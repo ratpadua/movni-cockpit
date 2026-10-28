@@ -125,6 +125,11 @@ npm start                  # build the client, then serve everything on :5178
    5. The batch / release is **ready only after QA approves**. Commits, pushes, packaging and
       production migrations still happen only when the owner asks.
 
+8. **Git workflow: `main` is protected.** Direct commits/pushes to `main` are rejected on GitHub (admins
+   included, force-push and deletion blocked). Work on a feature branch (`feature/…`, `fix/…`), push it
+   and open a **pull request**; the owner merges it. No approvals are required (solo owner). Commit,
+   push and open PRs only when the owner asks. Never try to bypass or weaken the protection.
+
 ### Safety (a past incident wiped the project)
 - **Never** run `robocopy /MIR`, `rmdir /s`, or any recursive delete over the project tree. `node_modules`
   once contained a self-referential `file:..` junction (a `movni-cockpit: file:..` dependency npm added
