@@ -1,0 +1,2 @@
+ALTER TABLE `contracts` ADD `receipt_template_id` int;--> statement-breakpoint
+ALTER TABLE `contracts` ADD CONSTRAINT `contracts_receipt_template_id_templates_id_fk` FOREIGN KEY (`receipt_template_id`) REFERENCES `templates`(`id`) ON DELETE set null ON UPDATE no action;

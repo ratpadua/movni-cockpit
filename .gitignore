@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+dist-portable/
+movni-cockpit-portable-win64.zip
+.env
+.env.local
+*.log
+storage/contracts/*
+!storage/contracts/.gitkeep
+server/drizzle/*.sql.meta
+.DS_Store
+Thumbs.db
+
+# IDE / personal tool settings (the shared .claude/agents/ definitions ARE tracked)
+.idea/
+.claude/settings.local.json
