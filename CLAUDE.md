@@ -111,6 +111,20 @@ npm start                  # build the client, then serve everything on :5178
 6. **Keep the project a complete, working project.** When cleaning for a zip, strip only the
    *bundle*; never delete `.env`, `README.md` or other project files from the source tree.
 
+7. **Agent pipeline for every batch of changes** (definitions in `.claude/agents/`, tracked in git).
+   The main session orchestrates; subagents cannot call each other, so it relays between them:
+   1. **`developer`** implements the batch (no typecheck/build/tests, no commits).
+   2. **`code-reviewer`** reviews only the new code (read-only) and returns `must-fix` / `suggestion`
+      points, ending with `VERDICT: APPROVED` or `CHANGES REQUESTED`.
+   3. If changes are requested, the points go back to the **`developer`**, who applies the ones he
+      judges real improvements and explains any he declines. Repeat 2-3 until both agree (reviewer
+      says APPROVED). If they still disagree after 3 rounds, stop and ask the owner to decide.
+   4. **`qa-specialist`** runs the full verification pass (rule 2) and tests every new feature and
+      change on the **dev** database. Any bug goes back to the `developer`, then through the
+      `code-reviewer` again for the fix, then back to QA. Repeat until QA says `VERDICT: APPROVED`.
+   5. The batch / release is **ready only after QA approves**. Commits, pushes, packaging and
+      production migrations still happen only when the owner asks.
+
 ### Safety (a past incident wiped the project)
 - **Never** run `robocopy /MIR`, `rmdir /s`, or any recursive delete over the project tree. `node_modules`
   once contained a self-referential `file:..` junction (a `movni-cockpit: file:..` dependency npm added
@@ -279,4 +293,5 @@ Temporarily set `.env` `DB_NAME` to production **and** `.env.local` to the produ
 - No admin rights and USB is blocked — install tools in user space.
 - A PowerShell safety hook blocks some destructive patterns (recursive removes, `/MIR`, …). Prefer
   explicit, narrow commands; use `[IO.Directory]::Delete(...)` for the rare cleanup of a known folder.
-- This folder is **not a git repository**.
+- This folder is a git repository (`origin` = `ratpadua/movni-cockpit` on GitHub, public). Commits are
+  authored as `ratpadua` with the GitHub `noreply` email. Never commit secrets, `.env`, or `.env.local`.
