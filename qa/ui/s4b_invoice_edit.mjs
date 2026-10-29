@@ -1,0 +1,61 @@
+import * as L from './lib.mjs';
+import * as U from './ui.mjs';
+import { st, start, contractsDirFiles } from './harness.mjs';
+const { api, ok, eq } = L;
+const S = await start();
+const { page } = S;
+const R = st.R1.id;
+const getR = async () => (await api('GET', `/api/contracts/${R}`)).body;
+const sp = (s) => s.replace(/ /g, ' ').replace(/\s+/g, ' ');
+
+await S.flow('Contrato recorrente: editar fatura (por identidade)', async () => {
+  let full = await getR();
+  const empties = full.invoices.filter((i) => !i.reference);
+  const credInv = full.invoices.find((i) => Number(i.creditApplied) > 0);
+  console.log('  invoices:', JSON.stringify(full.invoices.map((i) => [i.id, i.refNumber, i.reference, i.creditApplied, i.installments])));
+  ok('invoices from the earlier flow still exist', full.invoices.length >= 2, JSON.stringify(full.invoices.map((i) => i.id)));
+  await U.go(page, `/contracts/${R}`, undefined);
+  await page.getByText('Faturas').first().waitFor();
+  const card = (i) => page.locator('.mantine-Paper-root').filter({ hasText: i.reference ? i.refNumber : `Fatura #${i.id}` }).last();
+  const target = empties[0] || full.invoices.find((i) => !Number(i.creditApplied) && i.reference !== 'QAZ Ref Editada') || full.invoices[0];
+  await card(target).getByTitle('Editar fatura').click();
+  let d = U.dlg(page);
+  await d.getByText('Editar fatura').first().waitFor();
+  eq('edit modal Referência shows the invoice reference (empty for an empty-ref invoice)', await d.getByLabel('Referência').inputValue(), target.reference || '');
+  await d.getByLabel('Referência').fill('QAZ Ref Editada B');
+  await L.shot(page, 'recorrente_fatura_editar');
+  await d.getByRole('button', { name: 'Salvar alterações' }).click();
+  ok('toast "Fatura atualizada"', await U.toast(page, /Fatura atualizada/));
+  await page.waitForTimeout(900);
+  full = await getR();
+  ok('API: reference updated', full.invoices.find((i) => i.id === target.id).reference === 'QAZ Ref Editada B');
+  ok('screen shows the new reference instead of Fatura #id', (await U.bodyText(page)).includes('QAZ Ref Editada B'));
+  if (credInv) {
+    await page.locator('.mantine-Paper-root').filter({ hasText: credInv.refNumber }).last().getByTitle('Editar fatura').click();
+    d = U.dlg(page);
+    await d.getByText('Editar fatura').first().waitFor();
+    await page.waitForTimeout(900);
+    const dd = await d.locator('table input[placeholder="dd/mm/aaaa"]').evaluateAll((els) => els.map((e) => e.value));
+    ok('edit credit invoice: 2 due dates dd/MM/yyyy', dd.length === 2 && dd.every((x) => /^\d{2}\/\d{2}\/\d{4}$/.test(x)), JSON.stringify(dd));
+    const t = sp(await d.innerText());
+    ok('edit credit invoice shows credit reinstated and A parcelar', /A parcelar: R\$\s?780,00/.test(t) || /Crédito: -R\$\s?120,00/.test(t), t.slice(-300));
+    await L.shot(page, 'recorrente_fatura_editar_credito');
+    await d.getByRole('button', { name: 'Salvar alterações' }).click();
+    ok('toast Fatura atualizada (credit invoice, no changes)', await U.toast(page, /Fatura atualizada/));
+    await page.waitForTimeout(800);
+    full = await getR();
+    const ci = full.invoices.find((i) => i.id === credInv.id);
+    ok('API: credit invoice keeps credit applied (120) after re-save', Number(ci.creditApplied) === 120, ci.creditApplied);
+  }
+  // distinct doc names for the remaining empty-ref invoice(s) + edited one
+  for (const i of full.invoices.slice(0, 3)) await card(i).getByRole('button', { name: 'Gerar documento' }).click().catch(() => {});
+  await page.waitForTimeout(2500);
+  full = await getR();
+  const names = full.invoices.map((i) => (i.documents[0] || {}).fileName).filter(Boolean);
+  console.log('  names', JSON.stringify(names));
+  ok('generated invoice docs have distinct names', new Set(names).size === names.length && names.length >= 2, JSON.stringify(names));
+  for (const i of full.invoices) for (const dd of i.documents) await api('DELETE', `/api/contract-documents/${dd.id}`);
+  eq('storage/contracts clean', contractsDirFiles().length, 0);
+});
+L.saveResults('r4b.json'); L.saveEvents('e4b.json');
+await S.browser.close();

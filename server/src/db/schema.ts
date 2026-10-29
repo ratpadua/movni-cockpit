@@ -19,11 +19,11 @@ const longtext = customType<{ data: string }>({ dataType: () => 'longtext' });
 // Enums
 // ---------------------------------------------------------------------------
 
-const FLOWS = ['in', 'out'] as const; // money in (profit) | out (cost)
-const PAYMENT_STATUS = ['upcoming', 'done'] as const; // used by saída (cost) payments
-const RECEIPT_STATUS = ['open', 'received', 'sent'] as const; // entrada receipt lifecycle
-const CONTACT_METHODS = ['whatsapp', 'email'] as const; // preferred contact
-const CONTRACT_TYPES = ['contract', 'invoice'] as const; // one-time signed | recurring monthly
+export const FLOWS = ['in', 'out'] as const; // money in (profit) | out (cost)
+export const PAYMENT_STATUS = ['upcoming', 'done'] as const; // used by saída (cost) payments
+export const RECEIPT_STATUS = ['open', 'received', 'sent'] as const; // entrada receipt lifecycle
+export const CONTACT_METHODS = ['whatsapp', 'email'] as const; // preferred contact
+export const CONTRACT_TYPES = ['contract', 'invoice'] as const; // one-time signed | recurring monthly
 // One-time contract workflow (photography pipeline). Order matters — transitions
 // advance/revert one step. em_edicao and previas_enviadas are time-boxed (SLA).
 export const CONTRACT_STATUSES = [
@@ -322,6 +322,10 @@ export const transactions = mysqlTable('transactions', {
   description: varchar('description', { length: 512 }),
   memo: varchar('memo', { length: 512 }),
   amount: decimal('amount', { precision: 12, scale: 2 }).notNull(),
+  // The line as it appeared in the bank statement (date/amount may be edited in the
+  // preview). "Already imported" detection matches on these; null on older rows.
+  origDate: date('orig_date', { mode: 'string' }),
+  origAmount: decimal('orig_amount', { precision: 12, scale: 2 }),
   flow: mysqlEnum('flow', FLOWS).notNull(),
   categoryId: int('category_id').references(() => categories.id, { onDelete: 'set null' }),
   matchedPaymentId: int('matched_payment_id').references(() => payments.id, {

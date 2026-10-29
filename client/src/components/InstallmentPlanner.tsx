@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { Stack, Group, Text, Table, Alert } from '@mantine/core';
 import { Select } from './Select';
-import { DateInput } from '@mantine/dates';
+import DateField from './DateField';
 import { IconInfoCircle } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
 import { api, AppSettings } from '../api/client';
@@ -11,8 +11,6 @@ import {
   splitAmount,
   maxInstallmentsFor,
   todayIso,
-  isoToDate,
-  dateToIso,
 } from '../lib/dates';
 
 const brl = (n: number) => n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -90,13 +88,7 @@ export default function InstallmentPlanner({
           searchable
           comboboxProps={{ withinPortal: true }}
         />
-        <DateInput
-          label="Primeiro vencimento"
-          valueFormat="DD/MM/YYYY"
-          placeholder="dd/mm/aaaa"
-          value={isoToDate(value.dueDates[0] ?? '')}
-          onChange={(d) => setFirst(dateToIso(d))}
-        />
+        <DateField label="Primeiro vencimento" value={value.dueDates[0] ?? ''} onChange={setFirst} />
       </Group>
 
       {cashDiscount && count === 1 && (
@@ -120,13 +112,7 @@ export default function InstallmentPlanner({
                 {i + 1}/{count}
               </Table.Td>
               <Table.Td>
-                <DateInput
-                  size="xs"
-                  valueFormat="DD/MM/YYYY"
-                  placeholder="dd/mm/aaaa"
-                  value={isoToDate(value.dueDates[i] ?? '')}
-                  onChange={(d) => setOne(i, dateToIso(d))}
-                />
+                <DateField size="xs" value={value.dueDates[i] ?? ''} onChange={(iso) => setOne(i, iso)} />
               </Table.Td>
               <Table.Td ta="right">{brl(amt)}</Table.Td>
             </Table.Tr>

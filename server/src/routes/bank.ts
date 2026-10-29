@@ -2,6 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { and, eq, gte, lte, desc, or, inArray, isNull, sql } from 'drizzle-orm';
 import { db, schema } from '../db/client.js';
 import { parseOfx } from '../lib/ofx.js';
+import { todayIso } from '../lib/dates.js';
+import { FLOWS, badRequest, isOneOf, optionalId, parseIsoDateStrict, parseMoney } from '../lib/validate.js';
 
 // ---- text helpers for memo -> customer matching ----
 function normalize(s: string | null | undefined): string {
@@ -122,8 +124,9 @@ async function flagAlreadyImported(lines: StatementLine[], accountId: string | n
     const rows = await db
       .select({
         fitId: schema.transactions.fitId,
-        date: schema.transactions.date,
-        amount: schema.transactions.amount,
+        // Original statement values; rows from before they were recorded fall back to the stored ones.
+        date: sql<string>`DATE_FORMAT(COALESCE(${schema.transactions.origDate}, ${schema.transactions.date}), '%Y-%m-%d')`,
+        amount: sql<string>`COALESCE(${schema.transactions.origAmount}, ${schema.transactions.amount})`,
         accountId: schema.bankImports.accountId,
       })
       .from(schema.transactions)
@@ -135,8 +138,8 @@ async function flagAlreadyImported(lines: StatementLine[], accountId: string | n
   if (minDate) {
     const noFit = await db
       .select({
-        date: schema.transactions.date,
-        amount: schema.transactions.amount,
+        date: sql<string>`DATE_FORMAT(COALESCE(${schema.transactions.origDate}, ${schema.transactions.date}), '%Y-%m-%d')`,
+        amount: sql<string>`COALESCE(${schema.transactions.origAmount}, ${schema.transactions.amount})`,
         memo: schema.transactions.memo,
         accountId: schema.bankImports.accountId,
       })
@@ -146,8 +149,8 @@ async function flagAlreadyImported(lines: StatementLine[], accountId: string | n
         and(
           eq(schema.transactions.imported, true),
           isNull(schema.transactions.fitId),
-          gte(schema.transactions.date, minDate),
-          lte(schema.transactions.date, maxDate)
+          sql`COALESCE(${schema.transactions.origDate}, ${schema.transactions.date}) >= ${minDate}`,
+          sql`COALESCE(${schema.transactions.origDate}, ${schema.transactions.date}) <= ${maxDate}`
         )
       );
     for (const r of noFit) seen.add(`nofit|${r.accountId ?? ''}|${r.date}|${cents(Number(r.amount))}|${r.memo ?? ''}`);
@@ -191,10 +194,15 @@ export function registerBankRoutes(app: FastifyInstance) {
   // list of open receivables so the client can offer reconciliation options.
   app.post('/api/bank/parse', async (req: any, reply) => {
     const { fileName, content } = req.body ?? {};
-    if (!content) return reply.code(400).send({ error: 'content (OFX text) is required' });
+    if (!content) return reply.code(400).send({ error: 'O conteúdo do extrato (OFX) é obrigatório.' });
+
+    if (typeof content !== 'string') return reply.code(400).send({ error: 'Conteúdo do extrato inválido.' });
 
     const parsed = parseOfx(content);
     const open = await loadOpenReceivables();
+    // Receivables already auto-assigned to an earlier line of this statement; a
+    // payment can be reconciled by one line only.
+    const claimed = new Set<number>();
 
     const rawItems = parsed.transactions
       // Drop running-balance pseudo-rows.
@@ -215,11 +223,14 @@ export function registerBankRoutes(app: FastifyInstance) {
 
           // Certain match: exactly one by value, or (when several share a value)
           // exactly one of those also matches the name.
+          let certain: number | null = null;
           if (valueMatches.length === 1) {
-            matchedPaymentId = valueMatches[0].id;
+            certain = valueMatches[0].id;
           } else if (valueMatches.length > 1 && nameHits.length === 1) {
-            matchedPaymentId = nameHits[0].id;
+            certain = nameHits[0].id;
           }
+          // Duplicates are resolved below, once "already imported" lines are known.
+          matchedPaymentId = certain;
 
           // Candidates to surface first: value matches, else name-only matches.
           const candidates =
@@ -240,6 +251,8 @@ export function registerBankRoutes(app: FastifyInstance) {
           type: t.name ?? '',
           description: memo,
           amount: t.amount,
+          originalDate: t.date,
+          originalAmount: t.amount,
           flow,
           categoryId: null as number | null,
           matchedPaymentId,
@@ -253,11 +266,25 @@ export function registerBankRoutes(app: FastifyInstance) {
     const flags = await flagAlreadyImported(rawItems, parsed.accountId);
     const items = rawItems.map((it, i) => ({ ...it, alreadyImported: flags[i], selected: !flags[i] }));
 
+    // A receivable can be auto-assigned to one line only. New lines claim first (in
+    // statement order); an "already imported" line never takes one from them.
+    for (const it of items) {
+      if (it.alreadyImported || it.matchedPaymentId === null) continue;
+      if (claimed.has(it.matchedPaymentId)) it.matchedPaymentId = null;
+      else claimed.add(it.matchedPaymentId);
+    }
+    for (const it of items) {
+      if (!it.alreadyImported || it.matchedPaymentId === null) continue;
+      if (claimed.has(it.matchedPaymentId)) it.matchedPaymentId = null;
+      else claimed.add(it.matchedPaymentId);
+    }
+
     return {
       bankId: parsed.bankId,
       accountId: parsed.accountId,
       fileName,
       items,
+      skipped: parsed.skipped,
       openPayments: open.map((p) => ({ value: String(p.id), label: payLabel(p) })),
     };
   });
@@ -268,10 +295,98 @@ export function registerBankRoutes(app: FastifyInstance) {
   app.post('/api/bank/import', async (req: any, reply) => {
     const { items } = req.body ?? {};
     if (!Array.isArray(items) || items.length === 0) {
-      return reply.code(400).send({ error: 'no items to import' });
+      return reply.code(400).send({ error: 'Nenhum lançamento para importar.' });
+    }
+    if (items.length > 5000) {
+      return reply.code(400).send({ error: 'Lançamentos demais em uma única importação (máximo 5000).' });
     }
 
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayIso();
+
+    // ---- 1) Validate EVERY line before writing anything -------------------------
+    interface Prepared {
+      it: any;
+      date: string;
+      amount: number; // signed, as in the statement (possibly edited in the preview)
+      origDate: string; // statement date as parsed (fingerprint)
+      origAmount: number; // statement amount as parsed (fingerprint)
+      flow: 'in' | 'out';
+      matchedPaymentId: number | null;
+      contractId: number | null;
+      categoryId: number | null;
+    }
+    const prepared: Prepared[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const n = i + 1;
+      if (!it || typeof it !== 'object') return badRequest(reply, `Lançamento ${n}: dados inválidos.`);
+      const date = it.date == null || it.date === '' ? today : parseIsoDateStrict(it.date);
+      if (!date) return badRequest(reply, `Lançamento ${n}: data inválida.`);
+      const amount = parseMoney(it.amount);
+      if (amount === null) return badRequest(reply, `Lançamento ${n}: valor inválido.`);
+      if (it.flow != null && !isOneOf(FLOWS, it.flow)) return badRequest(reply, `Lançamento ${n}: tipo inválido.`);
+      const flow: 'in' | 'out' = it.flow ?? (amount < 0 ? 'out' : 'in');
+      // Original statement values (fingerprint); fall back to the (edited) ones if omitted.
+      const origDate = it.originalDate == null || it.originalDate === '' ? date : parseIsoDateStrict(it.originalDate);
+      if (!origDate) return badRequest(reply, `Lançamento ${n}: data original inválida.`);
+      const origAmount = it.originalAmount == null || it.originalAmount === '' ? amount : parseMoney(it.originalAmount);
+      if (origAmount === null) return badRequest(reply, `Lançamento ${n}: valor original inválido.`);
+      const categoryId = optionalId(it.categoryId);
+      const contractId = optionalId(it.contractId);
+      const matched = optionalId(it.matchedPaymentId);
+      if (categoryId === false) return badRequest(reply, `Lançamento ${n}: categoria inválida.`);
+      if (contractId === false) return badRequest(reply, `Lançamento ${n}: contrato inválido.`);
+      if (matched === false) return badRequest(reply, `Lançamento ${n}: referência inválida.`);
+      prepared.push({
+        it,
+        date,
+        amount,
+        origDate,
+        origAmount,
+        flow,
+        // A saída (cost) can never reconcile a receivable: ignore any reference.
+        matchedPaymentId: flow === 'out' ? null : matched ?? null,
+        contractId: contractId ?? null,
+        categoryId: categoryId ?? null,
+      });
+    }
+
+    // The payments chosen as Referência must exist, be entradas and still be open,
+    // and each can be reconciled by one line only.
+    const matchedIds = prepared.map((p) => p.matchedPaymentId).filter((x): x is number => x !== null);
+    if (new Set(matchedIds).size !== matchedIds.length) {
+      return badRequest(reply, 'O mesmo pagamento foi associado a mais de um lançamento.');
+    }
+    if (matchedIds.length > 0) {
+      const rows = await db.select().from(schema.payments).where(inArray(schema.payments.id, matchedIds));
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      for (let i = 0; i < prepared.length; i++) {
+        const id = prepared[i].matchedPaymentId;
+        if (id === null) continue;
+        const p = byId.get(id);
+        if (!p || p.flow !== 'in' || p.receiptStatus !== 'open') {
+          return badRequest(reply, `Lançamento ${i + 1}: o pagamento da Referência não está mais em aberto.`);
+        }
+      }
+    }
+    const contractIds = [...new Set(prepared.map((p) => p.contractId).filter((x): x is number => x !== null))];
+    if (contractIds.length > 0) {
+      const rows = await db
+        .select({ id: schema.contracts.id })
+        .from(schema.contracts)
+        .where(inArray(schema.contracts.id, contractIds));
+      if (rows.length !== contractIds.length) return badRequest(reply, 'Contrato associado não encontrado.');
+    }
+    const categoryIds = [...new Set(prepared.map((p) => p.categoryId).filter((x): x is number => x !== null))];
+    if (categoryIds.length > 0) {
+      const rows = await db
+        .select({ id: schema.categories.id })
+        .from(schema.categories)
+        .where(inArray(schema.categories.id, categoryIds));
+      if (rows.length !== categoryIds.length) return badRequest(reply, 'Categoria não encontrada.');
+    }
+
+    // ---- 2) Write ------------------------------------------------------------------
     let received = 0;
     let created = 0;
 
@@ -282,46 +397,47 @@ export function registerBankRoutes(app: FastifyInstance) {
       .insert(schema.bankImports)
       .values({
         fileName: String(fileName || 'extrato.ofx').slice(0, 512),
-        bankId: bankId ?? null,
-        accountId: accountId ?? null,
+        bankId: bankId != null ? String(bankId).slice(0, 64) : null,
+        accountId: accountId != null ? String(accountId).slice(0, 64) : null,
         itemCount: items.length,
       })
       .$returningId();
     const importId: number = impRes[0].id;
-    const record = (it: any, date: string, flow: 'in' | 'out', paymentId: number | null) =>
+    const record = (pr: Prepared, paymentId: number | null) =>
       db.insert(schema.transactions).values({
         importId,
-        fitId: it.fitId ? String(it.fitId).slice(0, 255) : null,
-        date,
-        description: it.type ? String(it.type).slice(0, 512) : null,
-        memo: it.description ? String(it.description).slice(0, 512) : null,
-        amount: String(Number(it.amount) || 0),
-        flow,
-        categoryId: it.categoryId ?? null,
+        fitId: pr.it.fitId ? String(pr.it.fitId).slice(0, 255) : null,
+        date: pr.date,
+        description: pr.it.type ? String(pr.it.type).slice(0, 512) : null,
+        memo: pr.it.description ? String(pr.it.description).slice(0, 512) : null,
+        amount: String(pr.amount),
+        origDate: pr.origDate,
+        origAmount: String(pr.origAmount),
+        flow: pr.flow,
+        categoryId: pr.categoryId,
         matchedPaymentId: paymentId,
         imported: true,
       });
 
-    for (const it of items) {
-      const date: string = it.date ?? today;
-      const amount = Math.abs(Number(it.amount) || 0);
-      const flow: 'in' | 'out' = it.flow ?? (Number(it.amount) < 0 ? 'out' : 'in');
+    for (const pr of prepared) {
+      const { it, date, flow } = pr;
+      const amount = Math.abs(pr.amount);
 
-      if (it.matchedPaymentId) {
+      if (pr.matchedPaymentId !== null) {
         await db
           .update(schema.payments)
           .set({ receiptStatus: 'received', receivedDate: date })
-          .where(eq(schema.payments.id, Number(it.matchedPaymentId)));
-        await record(it, date, flow, Number(it.matchedPaymentId));
+          .where(eq(schema.payments.id, pr.matchedPaymentId));
+        await record(pr, pr.matchedPaymentId);
         received++;
         continue;
       }
 
       const base: any = {
-        description: it.description || it.type || 'Lançamento bancário',
+        description: String(it.description || it.type || 'Lançamento bancário').slice(0, 255),
         amount: String(amount),
         flow,
-        categoryId: it.categoryId ?? null,
+        categoryId: pr.categoryId,
         dueDate: date,
       };
       if (flow === 'in') {
@@ -335,16 +451,16 @@ export function registerBankRoutes(app: FastifyInstance) {
       // Associate the income to a contract as an EXTRA payment: linked to the
       // contract (and its customer) but with no installment, so it never changes
       // the contract's value or installments.
-      if (it.contractId) {
-        base.contractId = Number(it.contractId);
+      if (pr.contractId !== null) {
+        base.contractId = pr.contractId;
         const [ct] = await db
           .select({ customerId: schema.contracts.customerId })
           .from(schema.contracts)
-          .where(eq(schema.contracts.id, Number(it.contractId)));
+          .where(eq(schema.contracts.id, pr.contractId));
         if (ct?.customerId) base.customerId = ct.customerId;
       }
       const payRes: any = await db.insert(schema.payments).values(base).$returningId();
-      await record(it, date, flow, payRes[0].id);
+      await record(pr, payRes[0].id);
       created++;
     }
 

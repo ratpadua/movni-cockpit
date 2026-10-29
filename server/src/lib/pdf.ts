@@ -23,22 +23,56 @@ function sofficeBinary(): string {
   return process.platform === 'win32' ? 'soffice.exe' : 'soffice';
 }
 
+// A conversion that hangs (e.g. LibreOffice waiting on a dialog) is killed after this long.
+const SOFFICE_TIMEOUT_MS = 120_000; // generous: a cold first start can be slow
+
+// Kill the process and its children (on Windows soffice.exe is only a launcher).
+function killTree(p: ReturnType<typeof spawn>) {
+  try {
+    if (process.platform === 'win32' && p.pid) {
+      const k = spawn('taskkill', ['/pid', String(p.pid), '/T', '/F'], { windowsHide: true });
+      k.on('error', () => {}); // an async spawn error must never crash the server
+    } else {
+      p.kill('SIGKILL');
+    }
+  } catch {
+    /* already gone */
+  }
+}
+
 function runSoffice(bin: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     const p = spawn(bin, args, { windowsHide: true });
     let err = '';
-    p.stderr.on('data', (d) => (err += d.toString()));
+    let settled = false;
+    const done = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      killTree(p);
+      done(() =>
+        reject(new Error('A conversão para PDF demorou demais e foi cancelada. Feche o LibreOffice e tente novamente.'))
+      );
+    }, SOFFICE_TIMEOUT_MS);
+    p.stderr?.on('data', (d) => (err += d.toString()));
     p.on('error', (e: any) =>
-      reject(
-        new Error(
-          e?.code === 'ENOENT'
-            ? 'LibreOffice não encontrado. Instale o LibreOffice (ou defina LIBREOFFICE_PATH) para exportar em PDF.'
-            : `Falha ao iniciar o LibreOffice: ${e?.message ?? e}`
+      done(() =>
+        reject(
+          new Error(
+            e?.code === 'ENOENT'
+              ? 'LibreOffice não encontrado. Instale o LibreOffice (ou defina LIBREOFFICE_PATH) para exportar em PDF.'
+              : `Falha ao iniciar o LibreOffice: ${e?.message ?? e}`
+          )
         )
       )
     );
     p.on('close', (code) =>
-      code === 0 ? resolve() : reject(new Error(`Falha ao converter o documento (código ${code}). ${err}`.trim()))
+      done(() =>
+        code === 0 ? resolve() : reject(new Error(`Falha ao converter o documento (código ${code}). ${err}`.trim()))
+      )
     );
   });
 }

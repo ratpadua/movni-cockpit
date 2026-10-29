@@ -20,6 +20,7 @@ import { IconUpload, IconDatabaseImport, IconInfoCircle } from '@tabler/icons-re
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import { api, Category, PreviewItem, OpenPaymentOption, ParsePreview, ContractSummary } from '../api/client';
+import { MONEY_INPUT } from '../lib/money';
 import DateField from '../components/DateField';
 
 const brl = (n: number) => n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -45,6 +46,9 @@ export default function BankImport() {
   });
   const [items, setItems] = useState<PreviewItem[]>([]);
   const [openPayments, setOpenPayments] = useState<OpenPaymentOption[]>([]);
+  // Raw text of an amount field while it is in a transient state ('-', ''), by row index.
+  const [amountDraft, setAmountDraft] = useState<Record<number, string>>({});
+  const [skipped, setSkipped] = useState(0); // lines the server could not read
 
   const { data: categories = [] } = useQuery({
     queryKey: ['/categories'],
@@ -62,12 +66,20 @@ export default function BankImport() {
   }));
 
   const parse = useMutation({
-    mutationFn: (content: string) => api.post<ParsePreview>('/bank/parse', { fileName, content }),
+    mutationFn: (vars: { name: string; content: string }) =>
+      api.post<ParsePreview>('/bank/parse', { fileName: vars.name, content: vars.content }),
     onSuccess: (res) => {
       setMeta({ bankId: res.bankId, accountId: res.accountId });
+      setAmountDraft({});
       setItems(res.items);
       setOpenPayments(res.openPayments);
-      notifications.show({ message: `${res.items.length} lançamentos lidos`, color: 'blue' });
+      setSkipped(res.skipped ?? 0);
+      notifications.show({
+        message:
+          `${res.items.length} lançamentos lidos` +
+          (res.skipped ? ` · ${res.skipped} ignorado(s) por valor inválido` : ''),
+        color: res.skipped ? 'yellow' : 'blue',
+      });
     },
     onError: (e: Error) => notifications.show({ message: e.message, color: 'red' }),
   });
@@ -93,8 +105,10 @@ export default function BankImport() {
         message: `${res.received} conciliado(s) · ${res.created} criado(s)`,
         color: 'green',
       });
+      setAmountDraft({});
       setItems([]);
       setOpenPayments([]);
+      setSkipped(0);
       setFileName('');
     },
     onError: (e: Error) => notifications.show({ message: e.message, color: 'red' }),
@@ -104,9 +118,17 @@ export default function BankImport() {
     if (!file) return;
     setFileName(file.name);
     const reader = new FileReader();
-    reader.onload = () => parse.mutate(decodeOfx(reader.result as ArrayBuffer));
+    reader.onload = () => parse.mutate({ name: file.name, content: decodeOfx(reader.result as ArrayBuffer) });
     reader.readAsArrayBuffer(file); // decode by sniffing UTF-8 vs Windows-1252
   };
+
+  const clearDraft = (idx: number) =>
+    setAmountDraft((d) => {
+      if (!(idx in d)) return d;
+      const rest = { ...d };
+      delete rest[idx];
+      return rest;
+    });
 
   const update = (idx: number, patch: Partial<PreviewItem>) =>
     setItems((arr) => arr.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
@@ -187,6 +209,13 @@ export default function BankImport() {
               {meta.accountId ? ` · Conta ${meta.accountId}` : ''}
             </Text>
           )}
+          {skipped > 0 && (
+            <Alert icon={<IconInfoCircle size={16} />} color="orange" variant="light">
+              {skipped === 1
+                ? '1 linha do arquivo foi ignorada porque o valor não pôde ser lido.'
+                : `${skipped} linhas do arquivo foram ignoradas porque o valor não pôde ser lido.`}
+            </Alert>
+          )}
           {alreadyCount > 0 && (
             <Alert icon={<IconInfoCircle size={16} />} color="yellow" variant="light">
               {alreadyCount === 1
@@ -264,12 +293,21 @@ export default function BankImport() {
                         <NumberInput
                           size="xs"
                           w={120}
-                          decimalScale={2}
-                          value={it.amount}
+                          {...MONEY_INPUT}
+                          value={amountDraft[idx] ?? it.amount}
                           onChange={(v) => {
-                            const n = Number(v);
-                            update(idx, { amount: n, flow: n < 0 ? 'out' : 'in' });
+                            // '-' / '' / strings are transient states while typing: keep the raw text
+                            // in a draft and only write a valid number to the item (never NaN).
+                            if (typeof v === 'number') {
+                              clearDraft(idx);
+                              update(idx, { amount: v, flow: v < 0 ? 'out' : 'in' });
+                              return;
+                            }
+                            setAmountDraft((d) => ({ ...d, [idx]: v }));
+                            const n = v.trim() === '' ? NaN : Number(v.replace(',', '.'));
+                            if (Number.isFinite(n)) update(idx, { amount: n, flow: n < 0 ? 'out' : 'in' });
                           }}
+                          onBlur={() => clearDraft(idx)}
                           styles={{ input: { color: valueColor, fontWeight: 600 } }}
                         />
                       </Table.Td>

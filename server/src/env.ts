@@ -12,3 +12,5 @@ config({ path: path.resolve(root, '.env') });
 // (migrate/seed/reset). The running app never needs it — credentials come from
 // the login screen instead.
 config({ path: path.resolve(root, '.env.local'), override: true });
+// Opt-in (DB_TARGET=local): gitignored .env.test points at the local Docker MySQL used for tests.
+if (process.env.DB_TARGET === 'local') config({ path: path.resolve(root, '.env.test'), override: true });

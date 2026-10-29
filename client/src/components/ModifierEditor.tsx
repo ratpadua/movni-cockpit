@@ -1,4 +1,5 @@
 import { ActionIcon, Button, Group, NumberInput, Stack, Text, TextInput } from '@mantine/core';
+import { MONEY_INPUT_BRL } from '../lib/money';
 import { IconPlus, IconTrash } from '@tabler/icons-react';
 
 export interface AdditionalDraft {
@@ -45,8 +46,7 @@ export default function AdditionalEditor({
           />
           <NumberInput
             placeholder="Preço"
-            prefix="R$ "
-            decimalScale={2}
+            {...MONEY_INPUT_BRL}
             w={130}
             value={m.price}
             onChange={(v) => update(i, { price: v })}

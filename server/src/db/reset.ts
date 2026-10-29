@@ -1,5 +1,6 @@
 import '../env.js';
 import mysql from 'mysql2/promise';
+import { dbSslOption } from './client.js';
 
 // Drops ALL tables in the target database. Safe for dev only.
 // Credentials come from .env.local (DB_USER/DB_PASS); target from .env.
@@ -15,7 +16,7 @@ async function main() {
     );
   }
 
-  const conn = await mysql.createConnection({ host, port, database, user, password });
+  const conn = await mysql.createConnection({ host, port, database, user, password, ...dbSslOption() });
 
   console.log(`Dropping all tables in "${database}"...`);
   const [rows] = await conn.query<any[]>(

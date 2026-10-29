@@ -1,5 +1,6 @@
 import '../env.js';
 import mysql from 'mysql2/promise';
+import { dbSslOption } from './client.js';
 
 // Idempotent, non-destructive schema catch-up for an EXISTING database (e.g. the
 // live production DB whose Drizzle migration history differs from dev). It only
@@ -80,6 +81,9 @@ const COLUMNS: { table: string; column: string; ddl: string }[] = [
   },
   // Per-contract receipt model (multiple receipt templates are allowed).
   { table: 'contracts', column: 'receipt_template_id', ddl: 'ADD COLUMN `receipt_template_id` int NULL' },
+  // Bank import: original statement date/amount (for "already imported" detection).
+  { table: 'transactions', column: 'orig_date', ddl: 'ADD COLUMN `orig_date` date NULL' },
+  { table: 'transactions', column: 'orig_amount', ddl: 'ADD COLUMN `orig_amount` decimal(12,2) NULL' },
 ];
 
 // Cross-table FKs added after the columns/tables exist (credit_id -> customer_credits).
@@ -111,7 +115,7 @@ async function main() {
     throw new Error('DB_HOST/DB_NAME (do .env) e DB_USER/DB_PASS (do .env.local) são obrigatórios.');
   }
 
-  const conn = await mysql.createConnection({ host, port, database, user, password });
+  const conn = await mysql.createConnection({ host, port, database, user, password, ...dbSslOption() });
   console.log(`Target DB: "${database}" @ ${host}`);
 
   // 1) Tables (IF NOT EXISTS — idempotent on its own).

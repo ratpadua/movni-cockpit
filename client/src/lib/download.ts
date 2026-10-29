@@ -3,8 +3,17 @@ import { notifications } from '@mantine/notifications';
 // Prefer the server-provided filename (Content-Disposition) over a fallback.
 export function filenameFromDisposition(cd: string | null, fallback: string): string {
   if (!cd) return fallback;
-  const m = /filename\*?=(?:UTF-8'')?"?([^"';]+)"?/i.exec(cd);
-  return m ? decodeURIComponent(m[1]) : fallback;
+  // RFC 5987 form first (full UTF-8 name), then the plain ASCII fallback.
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+  if (star) {
+    try {
+      return decodeURIComponent(star[1].trim());
+    } catch {
+      /* fall through to the plain filename */
+    }
+  }
+  const m = /filename="?([^";]+)"?/i.exec(cd);
+  return m ? m[1] : fallback;
 }
 
 // Fetch a file (docx/pdf) and trigger a browser download; show a notification on

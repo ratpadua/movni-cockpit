@@ -18,6 +18,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import { api, AppSettings } from '../api/client';
 import { logoSrc, readableText } from '../lib/theme';
+import { MONEY_INPUT_BRL } from '../lib/money';
 
 const SWATCHES = ['#ffffff', '#f8f9fa', '#1f2937', '#0b7285', '#2b8a3e', '#5f3dc4', '#c2255c', '#e8590c', '#228be6'];
 
@@ -188,8 +189,7 @@ export default function Settings() {
         </Text>
         <NumberInput
           label="Valor mínimo por parcela (R$)"
-          prefix="R$ "
-          decimalScale={2}
+          {...MONEY_INPUT_BRL}
           fixedDecimalScale
           min={1}
           w={240}

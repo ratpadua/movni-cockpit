@@ -32,6 +32,7 @@ import InstallmentPlanner, { InstallmentValue } from '../components/InstallmentP
 import DateField from '../components/DateField';
 import { downloadFile, generateReceipt } from '../lib/download';
 import { paymentSituation } from '../lib/paymentStatus';
+import { MONEY_INPUT_BRL } from '../lib/money';
 import PaymentFormModal from '../components/PaymentFormModal';
 import ContractFormModal from '../components/ContractFormModal';
 import { addBusinessDaysIso, todayIso, formatBr } from '../lib/dates';
@@ -199,11 +200,16 @@ export default function ContractDetail() {
     });
     setInvOpen(true);
   };
-  const { data: custCredits = [] } = useQuery({
-    queryKey: ['/customers', c?.customerId, 'credits'],
-    queryFn: () => api.get<CustomerCredit[]>(`/customers/${c!.customerId}/credits`),
+  // Load ALL credits (?all=1): a credit this invoice consumed completely has remaining 0 and
+  // would otherwise be missing from the edit modal. Fully used credits are then filtered
+  // out below, except the one already applied to the invoice being edited.
+  const { data: allCredits = [] } = useQuery({
+    queryKey: ['/customers', c?.customerId, 'credits', 'all'],
+    queryFn: () => api.get<CustomerCredit[]>(`/customers/${c!.customerId}/credits?all=1`),
     enabled: invOpen && !!c?.customerId,
   });
+  const appliedCreditId = invEditId ? c?.invoices.find((v) => v.id === invEditId)?.creditId ?? null : null;
+  const custCredits = allCredits.filter((cr) => Number(cr.remaining) > 0 || cr.id === appliedCreditId);
   const saveInvoice = useMutation({
     mutationFn: () => {
       const body = {
@@ -274,16 +280,20 @@ export default function ContractDetail() {
   const [payDesc, setPayDesc] = useState('');
   const [payAmount, setPayAmount] = useState<number | string>(0);
   const [payFlow, setPayFlow] = useState('in');
-  const [payStatus, setPayStatus] = useState('upcoming');
+  const [payStatus, setPayStatus] = useState('open'); // entrada: open|received; saída: upcoming|done
   const [payDue, setPayDue] = useState('');
   const [payCat, setPayCat] = useState<string | null>(null);
+  const [payTried, setPayTried] = useState(false); // show inline errors after the first click on Adicionar
+  const payDescError = payDesc.trim() === '' ? 'Informe a descrição.' : null;
+  const payAmountError = !(Number(payAmount) > 0) ? 'Informe um valor maior que zero.' : null;
   const openPayment = () => {
     setPayDesc('');
     setPayAmount(0);
     setPayFlow('in');
-    setPayStatus('upcoming');
+    setPayStatus('open');
     setPayDue(todayIso());
     setPayCat(null);
+    setPayTried(false);
     setPayOpen(true);
   };
   const addPayment = useMutation({
@@ -292,11 +302,25 @@ export default function ContractDetail() {
         contractId,
         customerId: c?.customerId ?? null,
         categoryId: payCat ? Number(payCat) : null,
-        description: payDesc || 'Pagamento avulso',
-        amount: Number(payAmount) || 0,
+        description: payDesc.trim(),
+        amount: Number(payAmount),
         flow: payFlow,
-        status: payStatus,
         dueDate: payDue || null,
+        // Entrada uses the receipt lifecycle (receiptStatus), saída the paid/unpaid status —
+        // same mapping as PaymentFormModal. Settled ones get today as received/paid date.
+        ...(payFlow === 'in'
+          ? {
+              receiptStatus: payStatus,
+              receivedDate: payStatus === 'open' ? null : todayIso(),
+              status: 'upcoming',
+              paidDate: null,
+            }
+          : {
+              status: payStatus,
+              paidDate: payStatus === 'done' ? todayIso() : null,
+              receiptStatus: 'open',
+              receivedDate: null,
+            }),
       }),
     onSuccess: () => {
       invalidate();
@@ -681,7 +705,7 @@ export default function ContractDetail() {
             {invMods.map((m, i) => (
               <Group key={i} gap="xs" wrap="nowrap" mb={4}>
                 <TextInput placeholder="Descrição" value={m.name} onChange={(e) => setInvMods((arr) => arr.map((x, idx) => (idx === i ? { ...x, name: e.currentTarget.value } : x)))} style={{ flex: 1 }} />
-                <NumberInput placeholder="Valor" prefix="R$ " decimalScale={2} w={130} value={m.price} onChange={(v) => setInvMods((arr) => arr.map((x, idx) => (idx === i ? { ...x, price: v } : x)))} />
+                <NumberInput placeholder="Valor" {...MONEY_INPUT_BRL} w={130} value={m.price} onChange={(v) => setInvMods((arr) => arr.map((x, idx) => (idx === i ? { ...x, price: v } : x)))} />
                 <NumberInput placeholder="Desc." suffix="%" min={0} max={100} w={90} value={m.disc} onChange={(v) => setInvMods((arr) => arr.map((x, idx) => (idx === i ? { ...x, disc: v } : x)))} />
                 <ActionIcon color="red" variant="subtle" onClick={() => setInvMods((arr) => arr.filter((_, idx) => idx !== i))}>
                   <IconTrash size={16} />
@@ -780,9 +804,9 @@ export default function ContractDetail() {
       {/* add extra payment modal */}
       <Modal opened={payOpen} onClose={() => setPayOpen(false)} title="Pagamento extra">
         <Stack>
-          <TextInput label="Descrição" value={payDesc} onChange={(e) => setPayDesc(e.currentTarget.value)} />
+          <TextInput label="Descrição" required value={payDesc} error={payTried ? payDescError : null} onChange={(e) => setPayDesc(e.currentTarget.value)} />
           <Group grow>
-            <NumberInput label="Valor (R$)" prefix="R$ " decimalScale={2} value={payAmount} onChange={setPayAmount} />
+            <NumberInput label="Valor (R$)" required {...MONEY_INPUT_BRL} clampBehavior="none" min={0.01} value={payAmount} error={payTried ? payAmountError : null} onChange={setPayAmount} />
             <Select
               label="Tipo"
               data={[
@@ -790,7 +814,13 @@ export default function ContractDetail() {
                 { value: 'out', label: 'Saída' },
               ]}
               value={payFlow}
-              onChange={(v) => setPayFlow(v ?? 'in')}
+              allowDeselect={false}
+              // Situação options differ per direction, so reset it when Tipo changes.
+              onChange={(v) => {
+                const f = v ?? 'in';
+                setPayFlow(f);
+                setPayStatus(f === 'in' ? 'open' : 'upcoming');
+              }}
             />
           </Group>
           <Select
@@ -807,23 +837,35 @@ export default function ContractDetail() {
           <Group grow>
             <Select
               label="Situação"
-              data={[
-                { value: 'upcoming', label: 'Em aberto' },
-                { value: 'done', label: 'Concluído' },
-              ]}
+              data={
+                payFlow === 'in'
+                  ? [
+                      { value: 'open', label: 'Aberto' },
+                      { value: 'received', label: 'Recebido' },
+                    ]
+                  : [
+                      { value: 'upcoming', label: 'A pagar' },
+                      { value: 'done', label: 'Pago' },
+                    ]
+              }
               value={payStatus}
-              onChange={(v) => setPayStatus(v ?? 'upcoming')}
+              allowDeselect={false}
+              onChange={(v) => setPayStatus(v ?? (payFlow === 'in' ? 'open' : 'upcoming'))}
             />
             <DateField label="Vencimento" value={payDue} onChange={setPayDue} />
           </Group>
           <Text size="xs" c="dimmed">
-            Entradas concluídas podem gerar recibo aqui e na tela Financeiro.
+            Entradas recebidas podem gerar recibo aqui e na tela Financeiro.
           </Text>
           <Group justify="flex-end">
             <Button variant="default" onClick={() => setPayOpen(false)}>
               Cancelar
             </Button>
-            <Button loading={addPayment.isPending} disabled={!payCat} onClick={() => addPayment.mutate()}>
+            <Button loading={addPayment.isPending} disabled={!payCat}
+              onClick={() => {
+                setPayTried(true);
+                if (!payDescError && !payAmountError) addPayment.mutate();
+              }}>
               Adicionar
             </Button>
           </Group>

@@ -1,7 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { eq, and } from 'drizzle-orm';
 import { db, schema } from '../db/client.js';
-import { renderDocument, docMime, longDatePtBR, parseIsoDate, type DocFormat } from '../lib/contract.js';
+import { renderDocument, docMime, longDatePtBR, parseIsoDate, sanitize, type DocFormat } from '../lib/contract.js';
+import { contentDisposition } from '../lib/http.js';
+import { badId, parseId } from '../lib/validate.js';
 import { loadTemplateById } from './templates.js';
 import { officeToPdf } from '../lib/pdf.js';
 
@@ -10,7 +12,8 @@ const brl = (n: number) => n.toLocaleString('pt-BR', { style: 'currency', curren
 export function registerReceiptRoutes(app: FastifyInstance) {
   // Generate + stream a receipt .docx for a received entrada, then mark it sent.
   app.post('/api/payments/:id/receipt', async (req: any, reply) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === null) return badId(reply);
     const [p] = await db.select().from(schema.payments).where(eq(schema.payments.id, id));
     if (!p) return reply.code(404).send({ error: 'pagamento não encontrado' });
     if (p.flow !== 'in' || (p.receiptStatus !== 'received' && p.receiptStatus !== 'sent')) {
@@ -130,12 +133,7 @@ export function registerReceiptRoutes(app: FastifyInstance) {
     }
 
     // File name: recibo_{cliente}[_{parcela}] — no date.
-    const cleanName = (c?.nickname || c?.name || 'cliente')
-      .normalize('NFD')
-      .replace(/[̀-ͯ]/g, '') // strip accents
-      .replace(/[^a-zA-Z0-9-_ ]/g, '')
-      .trim()
-      .replace(/\s+/g, '_');
+    const cleanName = sanitize(c?.nickname || c?.name || 'cliente') || 'cliente';
     // Include the installment as "_1-3", "_2-3"… in the file name. A single payment
     // (no installment, or just 1 of 1) gets no suffix.
     const parcela =
@@ -143,7 +141,7 @@ export function registerReceiptRoutes(app: FastifyInstance) {
         ? `_${p.installmentNumber}-${p.installmentCount}`
         : '';
     const fileName = `recibo_${cleanName}${parcela}.${ext}`;
-    reply.header('Content-Disposition', `attachment; filename="${fileName}"`);
+    reply.header('Content-Disposition', contentDisposition(fileName));
     reply.type(mime);
     return reply.send(out);
   });

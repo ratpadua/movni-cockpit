@@ -68,6 +68,7 @@ $startCmd = @'
 @echo off
 title Movni Cockpit
 cd /d "%~dp0server"
+set OPEN_BROWSER=1
 echo Iniciando o Movni Cockpit...
 echo O navegador abrira automaticamente. Se nao abrir, acesse: http://localhost:5178
 echo (Para encerrar, feche esta janela.)

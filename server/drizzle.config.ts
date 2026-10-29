@@ -7,6 +7,7 @@ import { defineConfig } from 'drizzle-kit';
 const here = path.dirname(fileURLToPath(import.meta.url));
 config({ path: path.resolve(here, '..', '.env') });
 config({ path: path.resolve(here, '..', '.env.local'), override: true });
+if (process.env.DB_TARGET === 'local') config({ path: path.resolve(here, '..', '.env.test'), override: true });
 
 // `db:generate` reads only the schema and needs no live connection. For
 // `db:push`/introspect, provide DB_USER/DB_PASS via .env.local.
