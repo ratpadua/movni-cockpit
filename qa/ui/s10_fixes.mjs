@@ -78,12 +78,56 @@ async function moneyBoth(label, loc, { prefix = 'R$ ', neg = false } = {}) {
     const n = await typeMoney(loc, '-1.234,56');
     ok(label + ': typing "-1.234,56" shows -' + prefix + '1.234,56', n === '-' + prefix + '1.234,56', 'shows "' + n + '"');
   }
-  await loc.fill('1234.56'); await loc.press('Tab');
-  const pp = sp(await loc.inputValue());
-  console.log('  PASTE "1234.56" in ' + label + ' ->', pp);
-  L.results.push({ flow: 'info', name: label + ': paste "1234.56" yields "' + pp + '"', pass: true, extra: '' });
+  await moneyPaste(label, loc, prefix, neg);
   await typeMoney(loc, '1234,56');
   return b;
+}
+// Real paste: select all (or place the caret / a partial selection via `sel`), dispatch a ClipboardEvent('paste')
+// with a DataTransfer (what Ctrl+V does), then blur. Returns { shown, cancelled }. If the handler does not cancel
+// the event, emulate the browser default (insert over the selection) so "unchanged" cases exercise
+// react-number-format's own handling; `cancelled` is asserted separately so this can't mask a broken handler.
+const pasteText = async (loc, text, sel) => {
+  await loc.click(); await loc.press('Control+a');
+  if (sel) await loc.evaluate((el, [a, b]) => el.setSelectionRange(a, b), sel);
+  const cancelled = await loc.evaluate((el, t) => {
+    const dt = new DataTransfer(); dt.setData('text/plain', t);
+    const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+    const notCancelled = el.dispatchEvent(ev);
+    if (notCancelled) {
+      const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      set.call(el, el.value.slice(0, el.selectionStart) + t + el.value.slice(el.selectionEnd));
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    return !notCancelled;
+  }, text);
+  await loc.press('Tab');
+  return { shown: sp(await loc.inputValue()), cancelled };
+};
+// Pasted text -> [expected display, handler converts it?]. Dot + 1-2 digits is a decimal; everything else keeps the pt-BR reading.
+// A field with fixedDecimalScale (Settings minimum) shows the same value padded to 2 decimals after blur: both accepted.
+async function moneyPaste(label, loc, prefix, neg) {
+  const cases = [
+    ['1234.56', '1.234,56', true], ['12.5', '12,5', true], ['R$ 1234.56', '1.234,56', true],
+    ['1.234,56', '1.234,56', false], ['1.234', '1.234', false], ['1.234.567', '1.234.567', false],
+    ['1234,56', '1.234,56', false], ['1234', '1.234', false], ['.5', null, false], ['1234.567', '1.234.567', false],
+  ];
+  if (neg) cases.splice(3, 0, ['-50.25', '-50,25', true]);
+  for (const [txt, want, conv] of cases) {
+    if (want === null) { // no digits before the dot: not a decimal, only assert the handler leaves it alone (display is react-number-format's call)
+      eq(label + ': paste "' + txt + '" is left to the default paste', (await pasteText(loc, txt)).cancelled, false);
+      continue;
+    }
+    const isNeg = want.startsWith('-');
+    const w = (isNeg ? '-' : '') + prefix + (isNeg ? want.slice(1) : want);
+    const padded = /,[0-9]$/.test(w) ? w + '0' : w + ',00';
+    const r = await pasteText(loc, txt);
+    ok(label + ': pasting "' + txt + '" shows ' + w, r.shown === w || r.shown === padded, 'shows "' + r.shown + '"');
+    eq(label + ': paste "' + txt + '" ' + (conv ? 'is converted (event cancelled)' : 'is left to the default paste'), r.cancelled, conv);
+  }
+  // caret / partial selection inside existing text: never converted, default paste applies
+  await typeMoney(loc, '1234,56');
+  const mid = await pasteText(loc, '99.5', [prefix.length + 1, prefix.length + 3]);
+  eq(label + ': dot-decimal pasted over a PARTIAL selection falls through to the default paste', mid.cancelled, false);
 }
 const dbl = (n) => Math.round(Number(n) * 100) / 100;
 
@@ -606,6 +650,37 @@ await S.flow('Fix 5 - Importar extrato: fingerprint com valores originais (data 
   eq('legacy row (orig_* NULL): exactly 1 "Já importado" (the old line), the new one is not flagged', await page.getByText('Já importado', { exact: true }).count(), 1);
   ok('"Importar selecionados (1)" (new line only)', await page.getByRole('button', { name: 'Importar selecionados (1)' }).isVisible());
   await L.shot(page, 'fix5_extrato_linha_legada');
+});
+
+await S.flow('Fix 3 - Dinheiro: Ctrl+V real com a area de transferencia', async () => {
+  await S.context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: L.BASE });
+  const realPaste = async (loc, text) => {
+    await page.evaluate((t) => navigator.clipboard.writeText(t), text);
+    await loc.click(); await loc.press('Control+a'); await loc.press('Control+v'); await loc.press('Tab');
+    return sp(await loc.inputValue());
+  };
+  await U.go(page, '/payments', 'Fluxo de Caixa');
+  await page.getByRole('button', { name: 'Novo pagamento' }).click();
+  const d = U.dlg(page);
+  const v = d.getByLabel('Valor (R$)');
+  eq('Ctrl+V "1234.56" -> R$ 1.234,56', await realPaste(v, '1234.56'), 'R$ 1.234,56');
+  eq('Ctrl+V "1.234" -> R$ 1.234 (thousands, untouched)', await realPaste(v, '1.234'), 'R$ 1.234');
+  eq('Ctrl+V "1.234,56" -> R$ 1.234,56', await realPaste(v, '1.234,56'), 'R$ 1.234,56');
+  eq('Ctrl+V "1234,56" -> R$ 1.234,56', await realPaste(v, '1234,56'), 'R$ 1.234,56');
+  eq('Ctrl+V "1.234.567" -> R$ 1.234.567', await realPaste(v, '1.234.567'), 'R$ 1.234.567');
+  await d.getByLabel('Descrição').fill('QAZ-FIX ctrl-v');
+  await realPaste(v, '1234.56');
+  await d.getByRole('button', { name: 'Salvar' }).click();
+  await d.waitFor({ state: 'hidden', timeout: 8000 });
+  await page.waitForTimeout(600);
+  const pv = (await api('GET', '/api/payments')).body.find((p) => p.description === 'QAZ-FIX ctrl-v');
+  eq('API: Ctrl+V 1234.56 saved as the number 1234.56', Number(pv?.amount), 1234.56);
+  // settings minimum (fixed decimals)
+  const orig = (await api('GET', '/api/settings')).body;
+  await U.go(page, '/settings', 'Aparência');
+  const min = page.getByLabel('Valor mínimo por parcela (R$)');
+  eq('Settings minimum: Ctrl+V "200.5" -> R$ 200,50', await realPaste(min, '200.5'), 'R$ 200,50');
+  await typeMoney(min, String(orig.minInstallmentValue).replace('.', ','));
 });
 
 await S.flow('Painel e telas principais (fumaca)', async () => {
