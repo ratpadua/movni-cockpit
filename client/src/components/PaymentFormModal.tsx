@@ -4,8 +4,9 @@ import { Select } from './Select';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import { api, Payment, Customer, ContractSummary, Category } from '../api/client';
-import { todayIso, recurrenceDates, FREQUENCY_LABELS, MAX_OCCURRENCES, type Frequency } from '../lib/dates';
+import { todayIso, formatBr, recurrenceDates, FREQUENCY_LABELS, MAX_OCCURRENCES, type Frequency } from '../lib/dates';
 import DateField from './DateField';
+import { MONEY_INPUT_BRL } from '../lib/money';
 import RecurrenceScopeModal, { type SeriesScope } from './RecurrenceScopeModal';
 
 const FREQUENCY_OPTIONS = (Object.keys(FREQUENCY_LABELS) as Frequency[]).map((value) => ({
@@ -116,14 +117,30 @@ export default function PaymentFormModal({
 
   const settled = !recurring && isSettled(fm.flow, fm.situation);
 
+  // Description required, amount > 0 (errors appear after the first Salvar click).
+  const [tried, setTried] = useState(false);
+  useEffect(() => {
+    if (opened) setTried(false);
+  }, [opened, payment]);
+  const descError = fm.description.trim() === '' ? 'Informe a descrição.' : null;
+  const amountError = !(Number(fm.amount) > 0) ? 'Informe um valor maior que zero.' : null;
+  // A legacy payment saved with its unchanged 0/negative amount may still be edited
+  // (the server only rejects a CHANGED amount <= 0).
+  const legacyAmountOk = !!payment && Number(fm.amount) === Number(payment.amount);
+  const invalid = !!descError || (!!amountError && !legacyAmountOk);
+  const submit = (fn: () => void) => {
+    setTried(true);
+    if (!invalid) fn();
+  };
+
   // Which payments of a series an edit applies to (asked when the payment is recurring).
   const [scopeOpen, setScopeOpen] = useState(false);
 
   const save = useMutation({
     mutationFn: (scope?: SeriesScope) => {
       const base = {
-        description: fm.description || 'Pagamento',
-        amount: Number(fm.amount) || 0,
+        description: fm.description.trim(),
+        amount: Number(fm.amount),
         flow: fm.flow,
         dueDate: fm.dueDate || null,
         customerId: fm.customerId ? Number(fm.customerId) : null,
@@ -160,9 +177,24 @@ export default function PaymentFormModal({
   return (
     <Modal opened={opened} onClose={onClose} title={payment ? 'Editar pagamento' : 'Novo pagamento'}>
       <Stack>
-        <TextInput label="Descrição" value={fm.description} onChange={(e) => setFm({ ...fm, description: e.currentTarget.value })} />
+        <TextInput
+          label="Descrição"
+          required
+          value={fm.description}
+          error={tried ? descError : null}
+          onChange={(e) => setFm({ ...fm, description: e.currentTarget.value })}
+        />
         <Group grow>
-          <NumberInput label="Valor (R$)" prefix="R$ " decimalScale={2} value={fm.amount} onChange={(v) => setFm({ ...fm, amount: v })} />
+          <NumberInput
+            label="Valor (R$)"
+            required
+            {...MONEY_INPUT_BRL}
+            clampBehavior="none"
+            min={payment ? undefined : 0.01} // editing: validated on save (legacy 0 must not be clamped silently)
+            value={fm.amount}
+            error={tried && !legacyAmountOk ? amountError : null}
+            onChange={(v) => setFm({ ...fm, amount: v })}
+          />
           <Select
             label="Tipo"
             data={[
@@ -246,8 +278,8 @@ export default function PaymentFormModal({
                 ) : occurrences.length > 0 ? (
                   <Alert color={occurrences.length > MANY_OCCURRENCES ? 'yellow' : 'blue'} variant="light">
                     Serão criados <b>{occurrences.length}</b> {occurrences.length === 1 ? 'pagamento' : 'pagamentos'}
-                    , do dia {occurrences[0].split('-').reverse().join('/')} ao dia{' '}
-                    {occurrences[occurrences.length - 1].split('-').reverse().join('/')}.
+                    , do dia {formatBr(occurrences[0])} ao dia{' '}
+                    {formatBr(occurrences[occurrences.length - 1])}.
                     {occurrences.length > MANY_OCCURRENCES ? ' São muitos pagamentos — confira se é isso mesmo.' : ''}
                   </Alert>
                 ) : null}
@@ -264,7 +296,7 @@ export default function PaymentFormModal({
             loading={save.isPending && !scopeOpen}
             disabled={recurrenceInvalid}
             // Editing a recurring payment asks which payments of the series to change.
-            onClick={() => (payment?.recurrenceId ? setScopeOpen(true) : save.mutate(undefined))}
+            onClick={() => submit(() => (payment?.recurrenceId ? setScopeOpen(true) : save.mutate(undefined)))}
           >
             {recurring ? 'Criar pagamentos' : 'Salvar'}
           </Button>

@@ -4,6 +4,7 @@ import { SimpleGrid, Paper, Text, Title, Stack, Table, Badge, Group, ScrollArea 
 import { api, Payment, Customer, OverdueContract } from '../api/client';
 import { STATUS_LABELS } from '../lib/status';
 import { isPaymentLate, isPaymentOpen, paymentSituation } from '../lib/paymentStatus';
+import { formatBr } from '../lib/dates';
 
 function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
@@ -19,7 +20,6 @@ function Stat({ label, value, color }: { label: string; value: string; color?: s
 }
 
 const brl = (n: number) => n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-const brDate = (s: string | null | undefined) => (s ? new Date(s + 'T00:00:00').toLocaleDateString('pt-BR') : '—');
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -90,7 +90,7 @@ export default function Dashboard() {
                   style={{ cursor: p.contractId ? 'pointer' : 'default' }}
                   onClick={() => p.contractId && navigate(`/contracts/${p.contractId}`)}
                 >
-                  <Table.Td c="red">{brDate(p.dueDate)}</Table.Td>
+                  <Table.Td c="red">{formatBr(p.dueDate)}</Table.Td>
                   <Table.Td>
                     {p.description}
                     {p.contractNumber ? ` · ${p.contractNumber}` : ''}
@@ -184,7 +184,7 @@ export default function Dashboard() {
                         {s.label}
                       </Badge>
                     </Table.Td>
-                    <Table.Td>{brDate(p.dueDate)}</Table.Td>
+                    <Table.Td>{formatBr(p.dueDate)}</Table.Td>
                     <Table.Td ta="right">{brl(Number(p.amount))}</Table.Td>
                   </Table.Tr>
                 );

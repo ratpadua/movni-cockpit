@@ -9,9 +9,15 @@ movni-cockpit-portable-win64.zip
 storage/contracts/*
 !storage/contracts/.gitkeep
 server/drizzle/*.sql.meta
+
+# QA scripts: only the sources are tracked
+qa/node_modules/
+qa/results/
+qa/screens/
 .DS_Store
 Thumbs.db
 
 # IDE / personal tool settings (the shared .claude/agents/ definitions ARE tracked)
 .idea/
 .claude/settings.local.json
+.env.test

@@ -15,6 +15,7 @@ import { IconFilter } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
 import { api, Category, ReportEntry } from '../api/client';
 import DateField from '../components/DateField';
+import { formatBr } from '../lib/dates';
 
 const brl = (n: number) => n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 
@@ -147,7 +148,7 @@ export default function Reports() {
             )}
             {rows.map((r) => (
               <Table.Tr key={r.id}>
-                <Table.Td>{r.date ?? '—'}</Table.Td>
+                <Table.Td>{formatBr(r.date)}</Table.Td>
                 <Table.Td>{r.description ?? '—'}</Table.Td>
                 <Table.Td>{r.customerNickname || r.customerName || '—'}</Table.Td>
                 <Table.Td>{r.categoryName ?? '—'}</Table.Td>

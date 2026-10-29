@@ -21,6 +21,14 @@ export function dbConfig() {
   };
 }
 
+// Optional TLS to the database, off unless DB_SSL=true is set in .env. When on, the
+// server certificate is verified (rejectUnauthorized). Spread into the mysql2 options.
+export function dbSslOption(): { ssl?: { rejectUnauthorized: boolean } } {
+  return String(process.env.DB_SSL ?? '').trim().toLowerCase() === 'true'
+    ? { ssl: { rejectUnauthorized: true } }
+    : {};
+}
+
 // Open (or replace) the active connection with the given credentials. Verifies
 // connectivity with a SELECT 1 before adopting the pool; throws on failure.
 export async function connectDb(user: string, password: string): Promise<void> {
@@ -35,6 +43,7 @@ export async function connectDb(user: string, password: string): Promise<void> {
     user,
     password,
     connectionLimit: 8,
+    ...dbSslOption(),
   });
   // Verify before adopting so a bad password doesn't leave a broken pool active.
   const conn = await pool.getConnection();

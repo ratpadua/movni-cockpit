@@ -15,7 +15,7 @@ import {
   Paper,
 } from '@mantine/core';
 import { Select } from './Select';
-import { DateInput } from '@mantine/dates';
+import DateField from './DateField';
 import { IconPlus, IconTrash, IconInfoCircle } from '@tabler/icons-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
@@ -29,7 +29,8 @@ import {
   ContractDetail,
 } from '../api/client';
 import InstallmentPlanner, { InstallmentValue } from './InstallmentPlanner';
-import { todayIso, isoToDate, dateToIso } from '../lib/dates';
+import { todayIso } from '../lib/dates';
+import { MONEY_INPUT_BRL } from '../lib/money';
 
 const brl = (n: number) => n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 
@@ -297,14 +298,7 @@ export default function ContractFormModal({
             </Group>
 
             <Group grow>
-              <DateInput
-                label="Data"
-                valueFormat="DD/MM/YYYY"
-                placeholder="dd/mm/aaaa"
-                value={isoToDate(execDate)}
-                onChange={(d) => setExecDate(dateToIso(d))}
-                clearable
-              />
+              <DateField label="Data" value={execDate} onChange={setExecDate} clearable />
               <TextInput type="time" label="Horário" value={execTime} onChange={(e) => setExecTime(e.currentTarget.value)} />
             </Group>
             <TextInput label="Locação" placeholder="Onde o serviço será executado" value={execAddress} onChange={(e) => setExecAddress(e.currentTarget.value)} />
@@ -378,7 +372,7 @@ export default function ContractFormModal({
               {modifiers.map((m, i) => (
                 <Group key={i} gap="xs" wrap="nowrap" mb={4}>
                   <TextInput placeholder="Descrição" value={m.name} onChange={(e) => setModifiers((arr) => arr.map((x, idx) => (idx === i ? { ...x, name: e.currentTarget.value } : x)))} style={{ flex: 1 }} />
-                  <NumberInput placeholder="Valor" prefix="R$ " decimalScale={2} w={130} value={m.price} onChange={(v) => setModifiers((arr) => arr.map((x, idx) => (idx === i ? { ...x, price: v } : x)))} />
+                  <NumberInput placeholder="Valor" {...MONEY_INPUT_BRL} w={130} value={m.price} onChange={(v) => setModifiers((arr) => arr.map((x, idx) => (idx === i ? { ...x, price: v } : x)))} />
                   <NumberInput placeholder="Desc." suffix="%" min={0} max={100} w={90} value={m.disc} onChange={(v) => setModifiers((arr) => arr.map((x, idx) => (idx === i ? { ...x, disc: v } : x)))} />
                   <ActionIcon color="red" variant="subtle" onClick={() => setModifiers((arr) => arr.filter((_, idx) => idx !== i))}>
                     <IconTrash size={16} />

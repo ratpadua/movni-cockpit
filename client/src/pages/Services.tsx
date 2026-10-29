@@ -31,6 +31,7 @@ import {
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import { api, ServiceCatalog, ServiceDetail } from '../api/client';
+import { MONEY_INPUT_BRL } from '../lib/money';
 import AdditionalEditor, { AdditionalDraft } from '../components/ModifierEditor';
 
 const brl = (n: number) => n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -344,7 +345,7 @@ export default function Services() {
               Isto cria uma <b>nova versão</b>. Contratos já existentes continuam com o preço da versão anterior.
             </Alert>
           )}
-          <NumberInput label="Preço base" prefix="R$ " decimalScale={2} value={basePrice} onChange={setBasePrice} />
+          <NumberInput label="Preço base" {...MONEY_INPUT_BRL} value={basePrice} onChange={setBasePrice} />
           <AdditionalEditor value={additionals} onChange={setAdditionals} />
           <Textarea label="Observações" value={notes} onChange={(e) => setNotes(e.currentTarget.value)} autosize minRows={1} />
           <Group justify="flex-end">
@@ -402,7 +403,7 @@ export default function Services() {
               onChange={(e) => setNewAddName(e.currentTarget.value)}
               style={{ flex: 1 }}
             />
-            <NumberInput label="Preço" prefix="R$ " decimalScale={2} value={newAddPrice} onChange={setNewAddPrice} w={140} />
+            <NumberInput label="Preço" {...MONEY_INPUT_BRL} value={newAddPrice} onChange={setNewAddPrice} w={140} />
             <Button
               leftSection={<IconPlus size={16} />}
               disabled={!newAddName.trim()}

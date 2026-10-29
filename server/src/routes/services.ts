@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { eq, and, desc, sql } from 'drizzle-orm';
 import { db, schema } from '../db/client.js';
+import { badId, badRequest, parseId, parseMoney } from '../lib/validate.js';
 
 // Load one service version + its additionals.
 async function loadVersionWithAdditionals(versionId: number) {
@@ -28,13 +29,39 @@ async function currentVersion(serviceId: number) {
   return v ? loadVersionWithAdditionals(v.id) : null;
 }
 
-async function insertAdditionals(versionId: number, additionals: any[] | undefined) {
-  if (Array.isArray(additionals) && additionals.length > 0) {
-    await db.insert(schema.serviceAdditionals).values(
-      additionals
-        .filter((m) => m && m.name)
-        .map((m) => ({ versionId, name: m.name, price: String(m.price ?? 0) }))
-    );
+interface AdditionalRow {
+  name: string;
+  price: string;
+}
+
+// Validate a list of additionals ({name, price}); entries without a name are dropped
+// (as before). Returns the clean rows or a pt-BR error message.
+function parseAdditionals(additionals: unknown): { rows: AdditionalRow[] } | { error: string } {
+  if (additionals === undefined || additionals === null) return { rows: [] };
+  if (!Array.isArray(additionals)) return { error: 'Lista de adicionais inválida.' };
+  const rows: AdditionalRow[] = [];
+  for (const m of additionals) {
+    if (!m || !m.name) continue;
+    if (typeof m.name !== 'string') return { error: 'Nome do adicional inválido.' };
+    if (m.name.length > 255) return { error: 'O nome do adicional excede 255 caracteres.' };
+    const price = parseMoney(m.price, { emptyAs: 0 });
+    if (price === null) return { error: `Preço inválido no adicional "${m.name}".` };
+    rows.push({ name: m.name, price: String(price) });
+  }
+  return { rows };
+}
+
+// Optional free-text field with a max length: undefined stays undefined, null/'' -> null.
+function textField(v: unknown, max: number): string | null | undefined | false {
+  if (v === undefined) return undefined;
+  if (v === null || v === '') return null;
+  if (typeof v !== 'string' || v.length > max) return false;
+  return v;
+}
+
+async function insertAdditionals(versionId: number, rows: AdditionalRow[]) {
+  if (rows.length > 0) {
+    await db.insert(schema.serviceAdditionals).values(rows.map((m) => ({ versionId, name: m.name, price: m.price })));
   }
 }
 
@@ -51,9 +78,10 @@ export function registerServiceRoutes(app: FastifyInstance) {
 
   // Full detail: service + all versions (with additionals), newest first.
   app.get('/api/services/:id', async (req: any, reply) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === null) return badId(reply);
     const [service] = await db.select().from(schema.services).where(eq(schema.services.id, id));
-    if (!service) return reply.code(404).send({ error: 'not found' });
+    if (!service) return reply.code(404).send({ error: 'Serviço não encontrado.' });
     const versions = await db
       .select()
       .from(schema.serviceVersions)
@@ -68,21 +96,30 @@ export function registerServiceRoutes(app: FastifyInstance) {
   // Body: { name, description?, basePrice?, notes?, additionals?: [{name, price}] }
   app.post('/api/services', async (req: any, reply) => {
     const { name, description, basePrice, notes, additionals } = req.body ?? {};
-    if (!name) return reply.code(400).send({ error: 'name is required' });
+    if (!name) return badRequest(reply, 'O nome é obrigatório.');
+    if (typeof name !== 'string' || name.length > 255) return badRequest(reply, 'Nome inválido (máximo 255 caracteres).');
+    const descVal = textField(description, 65535);
+    if (descVal === false) return badRequest(reply, 'Descrição inválida.');
+    const notesVal = textField(notes, 512);
+    if (notesVal === false) return badRequest(reply, 'Observações inválidas (máximo 512 caracteres).');
+    const price = parseMoney(basePrice, { emptyAs: 0 });
+    if (price === null) return badRequest(reply, 'Preço base inválido.');
+    const adds = parseAdditionals(additionals);
+    if ('error' in adds) return badRequest(reply, adds.error);
 
     const svcRes: any = await db
       .insert(schema.services)
-      .values({ name, description: description ?? null })
+      .values({ name, description: descVal ?? null })
       .$returningId();
     const serviceId = svcRes[0].id;
 
     const verRes: any = await db
       .insert(schema.serviceVersions)
-      .values({ serviceId, version: 1, basePrice: String(basePrice ?? 0), notes: notes ?? null, active: true })
+      .values({ serviceId, version: 1, basePrice: String(price), notes: notesVal ?? null, active: true })
       .$returningId();
     const versionId = verRes[0].id;
 
-    await insertAdditionals(versionId, additionals);
+    await insertAdditionals(versionId, adds.rows);
 
     reply.code(201);
     return { id: serviceId, currentVersion: await loadVersionWithAdditionals(versionId) };
@@ -92,11 +129,18 @@ export function registerServiceRoutes(app: FastifyInstance) {
   // Previous versions are retained but deactivated, so contracts keep their prices.
   // Body: { basePrice, notes?, additionals?: [{name, price}] }
   app.post('/api/services/:id/version', async (req: any, reply) => {
-    const serviceId = Number(req.params.id);
+    const serviceId = parseId(req.params.id);
+    if (serviceId === null) return badId(reply);
     const [service] = await db.select().from(schema.services).where(eq(schema.services.id, serviceId));
-    if (!service) return reply.code(404).send({ error: 'service not found' });
+    if (!service) return reply.code(404).send({ error: 'Serviço não encontrado.' });
 
     const { basePrice, notes, additionals } = req.body ?? {};
+    const notesVal = textField(notes, 512);
+    if (notesVal === false) return badRequest(reply, 'Observações inválidas (máximo 512 caracteres).');
+    const price = parseMoney(basePrice, { emptyAs: 0 });
+    if (price === null) return badRequest(reply, 'Preço base inválido.');
+    const adds = parseAdditionals(additionals);
+    if ('error' in adds) return badRequest(reply, adds.error);
 
     const [{ maxV }] = await db
       .select({ maxV: sql<number>`coalesce(max(${schema.serviceVersions.version}), 0)` })
@@ -113,14 +157,14 @@ export function registerServiceRoutes(app: FastifyInstance) {
       .values({
         serviceId,
         version: Number(maxV) + 1,
-        basePrice: String(basePrice ?? 0),
-        notes: notes ?? null,
+        basePrice: String(price),
+        notes: notesVal ?? null,
         active: true,
       })
       .$returningId();
     const versionId = verRes[0].id;
 
-    await insertAdditionals(versionId, additionals);
+    await insertAdditionals(versionId, adds.rows);
 
     reply.code(201);
     return { id: serviceId, currentVersion: await loadVersionWithAdditionals(versionId) };
@@ -131,44 +175,57 @@ export function registerServiceRoutes(app: FastifyInstance) {
   // unaffected; this only makes a new option available going forward.
   // Body: { name, price? }
   app.post('/api/services/:id/additionals', async (req: any, reply) => {
-    const serviceId = Number(req.params.id);
+    const serviceId = parseId(req.params.id);
+    if (serviceId === null) return badId(reply);
     const cur = await currentVersion(serviceId);
-    if (!cur) return reply.code(404).send({ error: 'service/version not found' });
+    if (!cur) return reply.code(404).send({ error: 'Serviço/versão não encontrado.' });
     const { name, price } = req.body ?? {};
-    if (!name) return reply.code(400).send({ error: 'name is required' });
+    if (!name) return badRequest(reply, 'O nome é obrigatório.');
+    if (typeof name !== 'string' || name.length > 255) return badRequest(reply, 'Nome inválido (máximo 255 caracteres).');
+    const priceVal = parseMoney(price, { emptyAs: 0 });
+    if (priceVal === null) return badRequest(reply, 'Preço inválido.');
     await db
       .insert(schema.serviceAdditionals)
-      .values({ versionId: cur.id, name, price: String(price ?? 0) });
+      .values({ versionId: cur.id, name, price: String(priceVal) });
     reply.code(201);
     return loadVersionWithAdditionals(cur.id);
   });
 
   // Remove an additional from the current version (does not touch existing contracts).
   app.delete('/api/services/:id/additionals/:addId', async (req: any, reply) => {
-    const addId = Number(req.params.addId);
+    const addId = parseId(req.params.addId);
+    if (addId === null) return badId(reply);
     await db.delete(schema.serviceAdditionals).where(eq(schema.serviceAdditionals.id, addId));
     return reply.code(204).send();
   });
 
   // Update identity fields only (name/description/active). Prices are versioned.
   app.put('/api/services/:id', async (req: any, reply) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === null) return badId(reply);
     const { name, description, active } = req.body ?? {};
-    await db
-      .update(schema.services)
-      .set({
-        ...(name !== undefined ? { name } : {}),
-        ...(description !== undefined ? { description } : {}),
-        ...(active !== undefined ? { active } : {}),
-      })
-      .where(eq(schema.services.id, id));
+    if (name !== undefined && (typeof name !== 'string' || name.trim() === '' || name.length > 255)) {
+      return badRequest(reply, 'Nome inválido (obrigatório, máximo 255 caracteres).');
+    }
+    const descVal = textField(description, 65535);
+    if (descVal === false) return badRequest(reply, 'Descrição inválida.');
+    if (active !== undefined && typeof active !== 'boolean') return badRequest(reply, 'Valor inválido para "ativo".');
+    const set = {
+      ...(name !== undefined ? { name } : {}),
+      ...(descVal !== undefined ? { description: descVal } : {}),
+      ...(active !== undefined ? { active } : {}),
+    };
+    if (Object.keys(set).length > 0) {
+      await db.update(schema.services).set(set).where(eq(schema.services.id, id));
+    }
     const [row] = await db.select().from(schema.services).where(eq(schema.services.id, id));
-    if (!row) return reply.code(404).send({ error: 'not found' });
+    if (!row) return reply.code(404).send({ error: 'Serviço não encontrado.' });
     return row;
   });
 
   app.delete('/api/services/:id', async (req: any, reply) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === null) return badId(reply);
     await db.delete(schema.services).where(eq(schema.services.id, id));
     return reply.code(204).send();
   });

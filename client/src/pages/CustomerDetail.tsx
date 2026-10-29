@@ -18,9 +18,10 @@ import { IconArrowLeft, IconPlus, IconTrash } from '@tabler/icons-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import { api, Customer, CustomerCredit, CustomerCharge } from '../api/client';
+import { formatBr } from '../lib/dates';
+import { MONEY_INPUT_BRL } from '../lib/money';
 
 const brl = (n: any) => Number(n).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-const brDate = (s: string | null) => (s ? new Date(s + 'T00:00:00').toLocaleDateString('pt-BR') : '—');
 
 export default function CustomerDetail() {
   const { id } = useParams();
@@ -196,7 +197,7 @@ export default function CustomerDetail() {
             <Table.Tbody>
               {charges.map((c) => (
                 <Table.Tr key={c.id}>
-                  <Table.Td>{brDate(c.dueDate)}</Table.Td>
+                  <Table.Td>{formatBr(c.dueDate)}</Table.Td>
                   <Table.Td>{c.description}</Table.Td>
                   <Table.Td>{c.contractNumber ?? '—'}</Table.Td>
                   <Table.Td ta="right">{brl(c.amount)}</Table.Td>
@@ -217,7 +218,7 @@ export default function CustomerDetail() {
             onChange={(e) => setDesc(e.currentTarget.value)}
             required
           />
-          <NumberInput label="Valor" prefix="R$ " min={0} decimalScale={2} value={value} onChange={setValue} required />
+          <NumberInput label="Valor" {...MONEY_INPUT_BRL} min={0} value={value} onChange={setValue} required />
           <Group justify="flex-end">
             <Button variant="default" onClick={() => setAddOpen(false)}>
               Cancelar

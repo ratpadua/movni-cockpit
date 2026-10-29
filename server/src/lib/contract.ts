@@ -3,10 +3,10 @@ import path from 'node:path';
 import PizZip from 'pizzip';
 import Docxtemplater from 'docxtemplater';
 import { renderOdt, isOdt } from './odt.js';
+import { PROJECT_ROOT } from './paths.js';
 
 const CONTRACTS_DIR = path.resolve(
-  process.cwd(),
-  '..',
+  PROJECT_ROOT,
   process.env.CONTRACTS_DIR?.replace(/^\.\//, '') ?? 'storage/contracts'
 );
 
@@ -47,11 +47,15 @@ export function formatOfFileName(fileName: string): DocFormat {
   return /\.odt$/i.test(fileName) ? 'odt' : 'docx';
 }
 
-function sanitize(name: string): string {
+// File-name safe version of a name: accents are transliterated (í→i, ç→c), other
+// special characters dropped, spaces become underscores. Shared by every generated
+// file name (contract, fatura, receipt).
+export function sanitize(name: string): string {
   return name
     .normalize('NFD') // split accented letters into base + combining mark
     .replace(/[̀-ͯ]/g, '') // drop the marks, keeping the base char (í→i, ç→c, ã→a)
     .replace(/[^a-zA-Z0-9-_ ]/g, '')
+    .trim()
     .replace(/\s+/g, '_');
 }
 

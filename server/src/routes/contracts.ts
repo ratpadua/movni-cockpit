@@ -1,8 +1,27 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { eq, and, isNull, desc, inArray, like } from 'drizzle-orm';
+import { eq, ne, and, isNull, desc, inArray, like } from 'drizzle-orm';
 import { db, schema } from '../db/client.js';
-import { generateContract, longDatePtBR, parseIsoDate, docMime, formatOfFileName } from '../lib/contract.js';
+import {
+  generateContract,
+  longDatePtBR,
+  parseIsoDate,
+  docMime,
+  formatOfFileName,
+  sanitize,
+  contractsDir,
+} from '../lib/contract.js';
+import { contentDisposition } from '../lib/http.js';
+import {
+  CONTRACT_TYPES,
+  badRequest,
+  isOneOf,
+  optionalDate,
+  optionalId,
+  parseId,
+  parseMoney,
+} from '../lib/validate.js';
 import { loadTemplateById } from './templates.js';
 import { getMinInstallmentValue } from './settings.js';
 import { officeToPdf } from '../lib/pdf.js';
@@ -14,6 +33,125 @@ const brDate = (s?: string | null) => {
 
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
+
+// A document record as the client sees it: never the absolute path on this machine.
+function publicDocument<T extends { filePath?: unknown }>(d: T): Omit<T, 'filePath'> {
+  const { filePath: _filePath, ...rest } = d;
+  return rest;
+}
+
+// ---- request validation (shape/format only; business rules live in the routes) ----
+
+// Optional text field: undefined/null/'' pass; otherwise a string within `max`.
+const textOk = (v: unknown, max: number) =>
+  v === undefined || v === null || (typeof v === 'string' && v.length <= max);
+
+// Free-value modifiers: [{ name, price, discountPercent }]; nameless entries are
+// ignored later (as before). Returns an error message or null.
+function modifiersError(modifiers: unknown): string | null {
+  if (modifiers === undefined || modifiers === null) return null;
+  if (!Array.isArray(modifiers)) return 'Lista de modificadores inválida.';
+  for (const m of modifiers) {
+    if (!m || !m.name) continue;
+    if (typeof m.name !== 'string' || m.name.length > 255) return 'Nome de modificador inválido (máximo 255 caracteres).';
+    if (parseMoney(m.price, { emptyAs: 0 }) === null) return `Valor inválido no modificador "${m.name}".`;
+    if (m.discountPercent != null && m.discountPercent !== '' && !Number.isFinite(Number(m.discountPercent))) {
+      return `Desconto inválido no modificador "${m.name}".`;
+    }
+  }
+  return null;
+}
+
+// Installment due dates: an array of calendar dates (''/null allowed). Normalises ''
+// to null in place. Returns an error message or null.
+function dueDatesError(body: any): string | null {
+  const dd = body.dueDates;
+  if (dd === undefined || dd === null) return null;
+  if (!Array.isArray(dd) || dd.length > 1000) return 'Lista de vencimentos inválida.';
+  for (let i = 0; i < dd.length; i++) {
+    const v = optionalDate(dd[i]);
+    if (v === false) return `Vencimento da parcela ${i + 1}: data inválida.`;
+    dd[i] = v ?? null;
+  }
+  return null;
+}
+
+function installmentsError(v: unknown): string | null {
+  if (v === undefined || v === null || v === '') return null;
+  return typeof v !== 'object' && Number.isFinite(Number(v)) ? null : 'Número de parcelas inválido.';
+}
+
+// Create/update body of a contract (every field optional, as before — e.g. a contract
+// without a customer is still allowed). Returns a pt-BR error or null.
+function contractBodyError(body: any): string | null {
+  if (body !== undefined && (body === null || typeof body !== 'object' || Array.isArray(body))) {
+    return 'Dados inválidos.';
+  }
+  const b = body ?? {};
+  for (const [k, label] of [
+    ['customerId', 'Cliente'],
+    ['templateId', 'Modelo do contrato'],
+    ['invoiceTemplateId', 'Modelo da fatura'],
+    ['receiptTemplateId', 'Modelo do recibo'],
+    ['creditId', 'Crédito'],
+  ] as const) {
+    if (optionalId(b[k]) === false) return `${label} inválido.`;
+  }
+  if (b.type != null && !isOneOf(CONTRACT_TYPES, b.type)) return 'Tipo de contrato inválido.';
+  if (optionalDate(b.executionDate) === false) return 'Data inválida (data de execução).';
+  if (!textOk(b.title, 255)) return 'Título inválido (máximo 255 caracteres).';
+  if (b.comments != null && typeof b.comments !== 'string') return 'Observações inválidas.';
+  if (!textOk(b.executionTime, 16)) return 'Horário inválido.';
+  if (!textOk(b.executionAddress, 512)) return 'Locação inválida (máximo 512 caracteres).';
+  if (!textOk(b.duration, 128)) return 'Duração inválida (máximo 128 caracteres).';
+  if (b.quantity != null && b.quantity !== '') {
+    const q = Number(b.quantity);
+    if (typeof b.quantity === 'object' || !Number.isFinite(q) || q < 0 || q > 2147483647) return 'Quantidade inválida.';
+  }
+  const inst = installmentsError(b.installments);
+  if (inst) return inst;
+  const dd = dueDatesError(b);
+  if (dd) return dd;
+  if (b.items !== undefined && b.items !== null) {
+    if (!Array.isArray(b.items)) return 'Lista de itens inválida.';
+    for (const it of b.items) {
+      if (!it || typeof it !== 'object' || parseId(it.serviceVersionId) === null) return 'Serviço do item inválido.';
+      if (it.additionals != null && !Array.isArray(it.additionals)) return 'Adicionais do item inválidos.';
+    }
+  }
+  return modifiersError(b.modifiers);
+}
+
+// Body of an invoice (fatura) create/edit. Returns a pt-BR error or null.
+function invoiceBodyError(body: any): string | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return 'Dados inválidos.';
+  if (!Array.isArray(body.itemIds) || body.itemIds.length === 0) return null; // reported by the route
+  if (body.itemIds.length > 5000 || body.itemIds.some((n: unknown) => parseId(n) === null)) {
+    return 'Lista de serviços inválida.';
+  }
+  if (!textOk(body.reference, 255)) return 'Referência inválida (máximo 255 caracteres).';
+  if (body.comments != null && typeof body.comments !== 'string') return 'Observações inválidas.';
+  if (body.discountPercent != null && body.discountPercent !== '' && !Number.isFinite(Number(body.discountPercent))) {
+    return 'Desconto inválido.';
+  }
+  if (optionalId(body.creditId) === false) return 'Crédito inválido.';
+  const inst = installmentsError(body.installments);
+  if (inst) return inst;
+  const dd = dueDatesError(body);
+  if (dd) return dd;
+  return modifiersError(body.modifiers);
+}
+
+// Where a stored document lives on disk. The DB's file_path is NOT trusted: the file
+// is always <contracts dir>/<basename of file_name>, and the result must stay inside
+// that directory. Null when the name is unusable.
+function documentPath(fileName: string): string | null {
+  const dir = path.resolve(contractsDir());
+  const base = path.basename(String(fileName ?? ''));
+  if (!base || base === '.' || base === '..') return null;
+  const full = path.resolve(path.join(dir, base));
+  return full.startsWith(dir + path.sep) ? full : null;
+}
 
 // Max installments so no installment is below the configured minimum value
 // (Configurações → Parcelamento, R$150 by default); at least 1.
@@ -504,11 +642,13 @@ async function loadFullContract(id: number) {
     .from(schema.contractModifiers)
     .where(eq(schema.contractModifiers.contractId, id));
 
-  const documents = await db
-    .select()
-    .from(schema.contractDocuments)
-    .where(eq(schema.contractDocuments.contractId, id))
-    .orderBy(desc(schema.contractDocuments.generatedAt));
+  const documents = (
+    await db
+      .select()
+      .from(schema.contractDocuments)
+      .where(eq(schema.contractDocuments.contractId, id))
+      .orderBy(desc(schema.contractDocuments.generatedAt))
+  ).map(publicDocument);
 
   // All payments (installments) generated for this contract.
   const allPayments = await db
@@ -596,7 +736,7 @@ export function registerContractRoutes(app: FastifyInstance) {
 
   app.get('/api/contracts/:id', async (req: any, reply) => {
     const full = await loadFullContract(Number(req.params.id));
-    if (!full) return reply.code(404).send({ error: 'not found' });
+    if (!full) return reply.code(404).send({ error: 'Registro não encontrado.' });
     return full;
   });
 
@@ -605,7 +745,7 @@ export function registerContractRoutes(app: FastifyInstance) {
     const id = Number(req.params.id);
     const { status } = req.body ?? {};
     const [c] = await db.select().from(schema.contracts).where(eq(schema.contracts.id, id));
-    if (!c) return reply.code(404).send({ error: 'not found' });
+    if (!c) return reply.code(404).send({ error: 'Registro não encontrado.' });
     const statuses = schema.CONTRACT_STATUSES as readonly string[];
     const curIdx = statuses.indexOf(c.status);
     const nextIdx = statuses.indexOf(status);
@@ -626,6 +766,8 @@ export function registerContractRoutes(app: FastifyInstance) {
   //   where item = { serviceVersionId, quantity?, discountPercent?, additionals:[{additionalId, quantity, discountPercent}] }
   // Recurring body: { customerId, type:'invoice', title?, invoiceTemplateId?, comments }
   app.post('/api/contracts', async (req: any, reply) => {
+    const bodyError = contractBodyError(req.body);
+    if (bodyError) return badRequest(reply, bodyError);
     const {
       customerId,
       type,
@@ -676,7 +818,7 @@ export function registerContractRoutes(app: FastifyInstance) {
         templateId: isOneTime ? templateId ?? null : null,
         invoiceTemplateId: isOneTime ? null : invoiceTemplateId ?? null,
         receiptTemplateId: receiptTemplateId ?? null,
-        executionDate: executionDate ?? null,
+        executionDate: executionDate || null,
         executionTime: executionTime ?? null,
         executionAddress: executionAddress ?? null,
         duration: isOneTime ? duration ?? null : null,
@@ -727,9 +869,12 @@ export function registerContractRoutes(app: FastifyInstance) {
   // an item to a different version on purpose.
   // Body: { customerId?, type?, title?, comments?, items:[{serviceVersionId, modifierIds:[]}] }
   app.put('/api/contracts/:id', async (req: any, reply) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === null) return badRequest(reply, 'Identificador inválido.');
     const [existing] = await db.select().from(schema.contracts).where(eq(schema.contracts.id, id));
-    if (!existing) return reply.code(404).send({ error: 'not found' });
+    if (!existing) return reply.code(404).send({ error: 'Registro não encontrado.' });
+    const bodyError = contractBodyError(req.body);
+    if (bodyError) return badRequest(reply, bodyError);
 
     const {
       customerId,
@@ -773,7 +918,7 @@ export function registerContractRoutes(app: FastifyInstance) {
         ...(templateId !== undefined ? { templateId: templateId ?? null } : {}),
         ...(invoiceTemplateId !== undefined ? { invoiceTemplateId: invoiceTemplateId ?? null } : {}),
         ...(receiptTemplateId !== undefined ? { receiptTemplateId: receiptTemplateId ?? null } : {}),
-        ...(executionDate !== undefined ? { executionDate: executionDate ?? null } : {}),
+        ...(executionDate !== undefined ? { executionDate: executionDate || null } : {}),
         ...(executionTime !== undefined ? { executionTime: executionTime ?? null } : {}),
         ...(executionAddress !== undefined ? { executionAddress: executionAddress ?? null } : {}),
         ...(duration !== undefined ? { duration: duration ?? null } : {}),
@@ -825,9 +970,11 @@ export function registerContractRoutes(app: FastifyInstance) {
   app.post('/api/contracts/:id/items', async (req: any, reply) => {
     const contractId = Number(req.params.id);
     const [contract] = await db.select().from(schema.contracts).where(eq(schema.contracts.id, contractId));
-    if (!contract) return reply.code(404).send({ error: 'contract not found' });
+    if (!contract) return reply.code(404).send({ error: 'Contrato não encontrado.' });
 
     const { serviceVersionId, additionals, description, performedAt, quantity, discountPercent, items } = req.body ?? {};
+    if (parseId(serviceVersionId) === null) return badRequest(reply, 'Serviço inválido.');
+    if (optionalDate(performedAt) === false) return badRequest(reply, 'Data inválida (data de realização).');
 
     // Batch mode: each entry becomes a separate single-unit item sharing one
     // service version + performed date, with its own description and additionals.
@@ -839,10 +986,10 @@ export function registerContractRoutes(app: FastifyInstance) {
           discountPercent: entry?.discountPercent ?? discountPercent,
           additionals: entry?.additionals,
         });
-        if (!row) return reply.code(400).send({ error: 'invalid serviceVersionId' });
+        if (!row) return reply.code(400).send({ error: 'Serviço inválido.' });
         await persistOneItem(contractId, row, {
           description: entry?.description ?? null,
-          performedAt: performedAt ?? null,
+          performedAt: performedAt || null,
           invoiceId: null,
         });
       }
@@ -853,11 +1000,11 @@ export function registerContractRoutes(app: FastifyInstance) {
 
     // Single item (legacy).
     const row = await snapshotOne({ serviceVersionId: Number(serviceVersionId), quantity, discountPercent, additionals });
-    if (!row) return reply.code(400).send({ error: 'invalid serviceVersionId' });
+    if (!row) return reply.code(400).send({ error: 'Serviço inválido.' });
 
     await persistOneItem(contractId, row, {
       description: description ?? null,
-      performedAt: performedAt ?? null,
+      performedAt: performedAt || null,
       invoiceId: null,
     });
     await recomputeContractTotal(contractId);
@@ -871,17 +1018,19 @@ export function registerContractRoutes(app: FastifyInstance) {
     const contractId = Number(req.params.id);
     const itemId = Number(req.params.itemId);
     const [item] = await db.select().from(schema.contractItems).where(eq(schema.contractItems.id, itemId));
-    if (!item || item.contractId !== contractId) return reply.code(404).send({ error: 'item not found' });
+    if (!item || item.contractId !== contractId) return reply.code(404).send({ error: 'Item não encontrado.' });
     if (item.invoiceId) return reply.code(409).send({ error: 'item já faturado; não pode ser editado' });
 
     const { serviceVersionId, additionals, description, performedAt, discountPercent } = req.body ?? {};
+    if (serviceVersionId != null && parseId(serviceVersionId) === null) return badRequest(reply, 'Serviço inválido.');
+    if (optionalDate(performedAt) === false) return badRequest(reply, 'Data inválida (data de realização).');
     const row = await snapshotOne({
       serviceVersionId: Number(serviceVersionId ?? item.serviceVersionId),
       quantity: item.quantity, // single-unit model: quantity is not changed here
       discountPercent: discountPercent ?? item.discountPercent,
       additionals,
     });
-    if (!row) return reply.code(400).send({ error: 'invalid serviceVersionId' });
+    if (!row) return reply.code(400).send({ error: 'Serviço inválido.' });
 
     await db
       .update(schema.contractItems)
@@ -893,7 +1042,7 @@ export function registerContractRoutes(app: FastifyInstance) {
         discountPercent: String(row.discountPercent),
         lineTotal: row.lineTotal,
         description: description ?? null,
-        performedAt: performedAt ?? null,
+        performedAt: performedAt || null,
       })
       .where(eq(schema.contractItems.id, itemId));
 
@@ -922,7 +1071,7 @@ export function registerContractRoutes(app: FastifyInstance) {
     const contractId = Number(req.params.id);
     const itemId = Number(req.params.itemId);
     const [item] = await db.select().from(schema.contractItems).where(eq(schema.contractItems.id, itemId));
-    if (!item) return reply.code(404).send({ error: 'item not found' });
+    if (!item) return reply.code(404).send({ error: 'Item não encontrado.' });
     if (item.invoiceId) return reply.code(409).send({ error: 'item já faturado; exclua a fatura primeiro' });
     await db.delete(schema.contractItems).where(eq(schema.contractItems.id, itemId));
     await recomputeContractTotal(contractId);
@@ -932,14 +1081,17 @@ export function registerContractRoutes(app: FastifyInstance) {
   // Create an invoice from selected (unbilled) performed services.
   // Body: { reference?, comments?, itemIds: number[], modifiers?: [{name,price,discountPercent}] }
   app.post('/api/contracts/:id/invoices', async (req: any, reply) => {
-    const contractId = Number(req.params.id);
+    const contractId = parseId(req.params.id);
+    if (contractId === null) return badRequest(reply, 'Identificador inválido.');
     const { itemIds } = req.body ?? {};
     if (!Array.isArray(itemIds) || itemIds.length === 0) {
       return reply.code(400).send({ error: 'selecione ao menos um serviço' });
     }
+    const invError = invoiceBodyError(req.body);
+    if (invError) return badRequest(reply, invError);
 
     const [contract] = await db.select().from(schema.contracts).where(eq(schema.contracts.id, contractId));
-    if (!contract) return reply.code(404).send({ error: 'contract not found' });
+    if (!contract) return reply.code(404).send({ error: 'Contrato não encontrado.' });
 
     // Only bill items that belong to this contract and are still unbilled.
     const items = await db
@@ -973,15 +1125,18 @@ export function registerContractRoutes(app: FastifyInstance) {
   // (returned to the open list); the previously applied credit is reinstated and
   // recomputed. Blocked once any installment has been received.
   app.put('/api/invoices/:id', async (req: any, reply) => {
-    const invoiceId = Number(req.params.id);
+    const invoiceId = parseId(req.params.id);
+    if (invoiceId === null) return badRequest(reply, 'Identificador inválido.');
     const { itemIds } = req.body ?? {};
     const [inv] = await db.select().from(schema.invoices).where(eq(schema.invoices.id, invoiceId));
-    if (!inv) return reply.code(404).send({ error: 'not found' });
+    if (!inv) return reply.code(404).send({ error: 'Registro não encontrado.' });
     if (!Array.isArray(itemIds) || itemIds.length === 0) {
       return reply.code(400).send({ error: 'selecione ao menos um serviço' });
     }
+    const invError = invoiceBodyError(req.body);
+    if (invError) return badRequest(reply, invError);
     const [contract] = await db.select().from(schema.contracts).where(eq(schema.contracts.id, inv.contractId));
-    if (!contract) return reply.code(404).send({ error: 'contract not found' });
+    if (!contract) return reply.code(404).send({ error: 'Contrato não encontrado.' });
 
     // Cannot edit once money has come in: any installment already received/sent.
     const invPayments = await db.select().from(schema.payments).where(eq(schema.payments.invoiceId, invoiceId));
@@ -1022,7 +1177,7 @@ export function registerContractRoutes(app: FastifyInstance) {
   app.delete('/api/invoices/:id', async (req: any, reply) => {
     const invoiceId = Number(req.params.id);
     const [inv] = await db.select().from(schema.invoices).where(eq(schema.invoices.id, invoiceId));
-    if (!inv) return reply.code(404).send({ error: 'not found' });
+    if (!inv) return reply.code(404).send({ error: 'Registro não encontrado.' });
     await reinstateInvoiceCredit(inv);
     await db
       .update(schema.contractItems)
@@ -1037,9 +1192,9 @@ export function registerContractRoutes(app: FastifyInstance) {
   app.post('/api/invoices/:id/generate', async (req: any, reply) => {
     const invoiceId = Number(req.params.id);
     const [inv] = await db.select().from(schema.invoices).where(eq(schema.invoices.id, invoiceId));
-    if (!inv) return reply.code(404).send({ error: 'invoice not found' });
+    if (!inv) return reply.code(404).send({ error: 'Fatura não encontrada.' });
     const full = await loadFullContract(inv.contractId);
-    if (!full) return reply.code(404).send({ error: 'contract not found' });
+    if (!full) return reply.code(404).send({ error: 'Contrato não encontrado.' });
 
     const c = full.customer;
     const now = new Date();
@@ -1180,7 +1335,26 @@ export function registerContractRoutes(app: FastifyInstance) {
       })),
     };
 
-    const baseName = `fatura_${c?.nickname || c?.name || 'cliente'}_${inv.reference ?? inv.refNumber ?? invoiceId}`;
+    // File name: fatura_{apelido}_{referência}. `||` (not `??`) so an empty reference
+    // falls back to the sequential number, then the id. If ANOTHER invoice already owns
+    // that file name (same customer + same reference), the invoice's own number is
+    // appended so one fatura never overwrites another's file.
+    const nick = sanitize(c?.nickname || c?.name || 'cliente') || 'cliente';
+    const refPart = sanitize(inv.reference || '') || sanitize(inv.refNumber || '') || String(invoiceId);
+    let baseName = `fatura_${nick}_${refPart}`;
+    const taken = await db
+      .select({ id: schema.contractDocuments.id })
+      .from(schema.contractDocuments)
+      .where(
+        and(
+          inArray(schema.contractDocuments.fileName, [`${sanitize(baseName)}.docx`, `${sanitize(baseName)}.odt`]),
+          ne(schema.contractDocuments.invoiceId, invoiceId)
+        )
+      )
+      .limit(1);
+    if (taken.length > 0) {
+      baseName += `_${sanitize(inv.refNumber || '') || invoiceId}`;
+    }
     // The recurring contract must have a selected invoice template (no default).
     const tpl = await loadTemplateById(full.invoiceTemplateId);
     if (!tpl) {
@@ -1215,14 +1389,14 @@ export function registerContractRoutes(app: FastifyInstance) {
       .from(schema.contractDocuments)
       .where(eq(schema.contractDocuments.id, docRes[0].id));
     reply.code(201);
-    return record;
+    return publicDocument(record);
   });
 
   // Generate a document (.docx or .odt, following the chosen model) from the contract. Body: { comments? } (extra popup note).
   app.post('/api/contracts/:id/generate', async (req: any, reply) => {
     const id = Number(req.params.id);
     const full = await loadFullContract(id);
-    if (!full) return reply.code(404).send({ error: 'contract not found' });
+    if (!full) return reply.code(404).send({ error: 'Contrato não encontrado.' });
 
     const now = new Date();
     const c = full.customer;
@@ -1322,12 +1496,7 @@ export function registerContractRoutes(app: FastifyInstance) {
     };
 
     // File name: contrato_{apelido}_{numero} (e.g. contrato_FS_26-001).
-    const nick = (c?.nickname || c?.name || 'cliente')
-      .normalize('NFD')
-      .replace(/[̀-ͯ]/g, '') // strip accents
-      .replace(/[^a-zA-Z0-9-_ ]/g, '')
-      .trim()
-      .replace(/\s+/g, '_');
+    const nick = sanitize(c?.nickname || c?.name || 'cliente') || 'cliente';
     const numPart = String(full.number ?? full.id).replace(/[^a-zA-Z0-9]+/g, '-');
     const baseName = `contrato_${nick}_${numPart}`;
     // The contract must have a selected document template (no default fallback).
@@ -1367,61 +1536,71 @@ export function registerContractRoutes(app: FastifyInstance) {
       .where(eq(schema.contractDocuments.id, docRes[0].id));
 
     reply.code(201);
-    return record;
+    return publicDocument(record);
   });
 
   // Download a generated document.
   app.get('/api/contract-documents/:id/download', async (req: any, reply) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === null) return badRequest(reply, 'Identificador inválido.');
     const [row] = await db
       .select()
       .from(schema.contractDocuments)
       .where(eq(schema.contractDocuments.id, id));
-    if (!row) return reply.code(404).send({ error: 'not found' });
-    if (!fs.existsSync(row.filePath)) {
-      return reply.code(410).send({ error: 'file no longer on this computer', filePath: row.filePath });
+    if (!row) return reply.code(404).send({ error: 'Documento não encontrado.' });
+    const file = documentPath(row.fileName);
+    if (!file) return badRequest(reply, 'Nome de arquivo do documento inválido.');
+    if (!fs.existsSync(file)) {
+      return reply.code(410).send({ error: 'O arquivo não está mais neste computador. Gere o documento novamente.' });
     }
-    reply.header('Content-Disposition', `attachment; filename="${row.fileName}"`);
+    reply.header('Content-Disposition', contentDisposition(row.fileName));
     reply.type(docMime(formatOfFileName(row.fileName)));
-    return reply.send(fs.createReadStream(row.filePath));
+    return reply.send(fs.createReadStream(file));
   });
 
   // Download the same document converted to PDF — generated on the fly from the
   // stored .docx/.odt and never saved in the project folder.
   app.get('/api/contract-documents/:id/pdf', async (req: any, reply) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === null) return badRequest(reply, 'Identificador inválido.');
     const [row] = await db
       .select()
       .from(schema.contractDocuments)
       .where(eq(schema.contractDocuments.id, id));
-    if (!row) return reply.code(404).send({ error: 'not found' });
-    if (!fs.existsSync(row.filePath)) {
-      return reply.code(410).send({ error: 'file no longer on this computer', filePath: row.filePath });
+    if (!row) return reply.code(404).send({ error: 'Documento não encontrado.' });
+    const file = documentPath(row.fileName);
+    if (!file) return badRequest(reply, 'Nome de arquivo do documento inválido.');
+    if (!fs.existsSync(file)) {
+      return reply.code(410).send({ error: 'O arquivo não está mais neste computador. Gere o documento novamente.' });
     }
     let pdf: Buffer;
     try {
-      const doc = await fs.promises.readFile(row.filePath);
+      const doc = await fs.promises.readFile(file);
       pdf = await officeToPdf(doc, formatOfFileName(row.fileName));
     } catch (err: any) {
       return reply.code(500).send({ error: err.message });
     }
     const pdfName = row.fileName.replace(/\.(docx|odt)$/i, '') + '.pdf';
-    reply.header('Content-Disposition', `attachment; filename="${pdfName}"`);
+    reply.header('Content-Disposition', contentDisposition(pdfName));
     reply.type('application/pdf');
     return reply.send(pdf);
   });
 
   // Delete a generated document — removes the DB record AND the file on disk.
   app.delete('/api/contract-documents/:id', async (req: any, reply) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === null) return badRequest(reply, 'Identificador inválido.');
     const [row] = await db
       .select()
       .from(schema.contractDocuments)
       .where(eq(schema.contractDocuments.id, id));
     if (!row) return reply.code(204).send();
-    if (row.filePath && fs.existsSync(row.filePath)) {
+    // Only ever delete the file inside the contracts folder. A record whose name
+    // resolves elsewhere is removed without touching the disk.
+    const file = documentPath(row.fileName);
+    if (file && fs.existsSync(file)) {
       try {
-        fs.unlinkSync(row.filePath);
+        fs.unlinkSync(file);
       } catch {
         /* ignore filesystem errors; still remove the record */
       }

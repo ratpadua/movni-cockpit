@@ -2,6 +2,12 @@ import type { FastifyInstance } from 'fastify';
 import { eq, desc } from 'drizzle-orm';
 import { db, schema } from '../db/client.js';
 import { detectDocFormat, docMime } from '../lib/contract.js';
+import { contentDisposition } from '../lib/http.js';
+import { badId, parseId } from '../lib/validate.js';
+
+// Column sizes in db/schema.ts (templates.name / templates.file_name).
+const MAX_NAME = 255;
+const MAX_FILE_NAME = 512;
 
 const KINDS = ['contract', 'invoice', 'receipt'] as const;
 type Kind = (typeof KINDS)[number];
@@ -41,8 +47,14 @@ export function registerTemplateRoutes(app: FastifyInstance) {
   // Add a template. Body: { kind, name, fileName, content (base64) }
   app.post('/api/templates', async (req: any, reply) => {
     const { kind, name, fileName, content: rawContent } = req.body ?? {};
-    if (!KINDS.includes(kind)) return reply.code(400).send({ error: 'tipo de modelo inválido' });
-    if (!rawContent) return reply.code(400).send({ error: 'envie o arquivo do modelo' });
+    if (!KINDS.includes(kind)) return reply.code(400).send({ error: 'Tipo de modelo inválido.' });
+    if (!rawContent || typeof rawContent !== 'string') return reply.code(400).send({ error: 'Envie o arquivo do modelo.' });
+    if (name != null && (typeof name !== 'string' || name.length > MAX_NAME)) {
+      return reply.code(400).send({ error: `O nome do modelo excede ${MAX_NAME} caracteres.` });
+    }
+    if (fileName != null && (typeof fileName !== 'string' || fileName.length > MAX_FILE_NAME)) {
+      return reply.code(400).send({ error: `O nome do arquivo excede ${MAX_FILE_NAME} caracteres.` });
+    }
 
     try {
       checkTemplate(rawContent);
@@ -61,10 +73,14 @@ export function registerTemplateRoutes(app: FastifyInstance) {
 
   // Update name only. Body: { name? }
   app.put('/api/templates/:id', async (req: any, reply) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === null) return badId(reply);
     const [t] = await db.select().from(schema.templates).where(eq(schema.templates.id, id));
-    if (!t) return reply.code(404).send({ error: 'not found' });
+    if (!t) return reply.code(404).send({ error: 'Modelo não encontrado.' });
     const { name } = req.body ?? {};
+    if (name !== undefined && (typeof name !== 'string' || name.trim() === '' || name.length > MAX_NAME)) {
+      return reply.code(400).send({ error: `Nome inválido (obrigatório, máximo ${MAX_NAME} caracteres).` });
+    }
     if (name !== undefined) {
       await db.update(schema.templates).set({ name }).where(eq(schema.templates.id, id));
     }
@@ -74,10 +90,12 @@ export function registerTemplateRoutes(app: FastifyInstance) {
 
   // Download a template by id.
   app.get('/api/templates/:id/download', async (req: any, reply) => {
-    const [t] = await db.select().from(schema.templates).where(eq(schema.templates.id, Number(req.params.id)));
-    if (!t) return reply.code(404).send({ error: 'not found' });
+    const id = parseId(req.params.id);
+    if (id === null) return badId(reply);
+    const [t] = await db.select().from(schema.templates).where(eq(schema.templates.id, id));
+    if (!t) return reply.code(404).send({ error: 'Modelo não encontrado.' });
     const buf = Buffer.from(t.content, 'base64');
-    reply.header('Content-Disposition', `attachment; filename="${t.fileName}"`);
+    reply.header('Content-Disposition', contentDisposition(t.fileName));
     reply.type(docMime(detectDocFormat(buf) ?? 'docx'));
     return reply.send(buf);
   });
@@ -87,11 +105,15 @@ export function registerTemplateRoutes(app: FastifyInstance) {
   // template is updated.
   // Body: { content (base64), fileName? }
   app.put('/api/templates/:id/content', async (req: any, reply) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === null) return badId(reply);
     const [t] = await db.select().from(schema.templates).where(eq(schema.templates.id, id));
-    if (!t) return reply.code(404).send({ error: 'not found' });
+    if (!t) return reply.code(404).send({ error: 'Modelo não encontrado.' });
     const { content: rawContent, fileName: rawFileName } = req.body ?? {};
-    if (!rawContent) return reply.code(400).send({ error: 'envie o arquivo do modelo' });
+    if (!rawContent || typeof rawContent !== 'string') return reply.code(400).send({ error: 'Envie o arquivo do modelo.' });
+    if (rawFileName != null && (typeof rawFileName !== 'string' || rawFileName.length > MAX_FILE_NAME)) {
+      return reply.code(400).send({ error: `O nome do arquivo excede ${MAX_FILE_NAME} caracteres.` });
+    }
     try {
       checkTemplate(rawContent);
     } catch (e: any) {
@@ -118,7 +140,8 @@ export function registerTemplateRoutes(app: FastifyInstance) {
   // blocked — the user should replace its file instead (PUT :id/content), which
   // keeps references intact.
   app.delete('/api/templates/:id', async (req: any, reply) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === null) return badId(reply);
     const [t] = await db.select().from(schema.templates).where(eq(schema.templates.id, id));
     if (!t) return reply.code(204).send();
 

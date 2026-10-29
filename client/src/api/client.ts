@@ -268,7 +268,6 @@ export interface ContractDocument {
   contractId?: number | null;
   comments?: string | null;
   fileName: string;
-  filePath: string;
   format: string;
   generatedAt: string;
 }
@@ -309,6 +308,10 @@ export interface PreviewItem {
   type: string; // bank <NAME>
   description: string; // bank <MEMO>
   amount: number;
+  // Values exactly as in the statement (set by /bank/parse, never edited in the preview);
+  // sent back on import so "Já importado" matches even when date/amount were edited.
+  originalDate?: string | null;
+  originalAmount?: number;
   flow: 'in' | 'out';
   categoryId: number | null;
   matchedPaymentId: number | null;
@@ -329,6 +332,7 @@ export interface ParsePreview {
   fileName: string;
   items: PreviewItem[];
   openPayments: OpenPaymentOption[];
+  skipped?: number; // statement lines that could not be read (invalid amount)
 }
 
 export interface ReportEntry {

@@ -224,7 +224,8 @@ function wrapPair(doc: N, open: Marker, close: Marker) {
 function lookup(scope: Scope | null, name: string): unknown {
   for (let s = scope; s; s = s.parent) {
     const d = s.data as Record<string, unknown> | null;
-    if (d && typeof d === 'object' && d[name] !== undefined) return d[name];
+    // Own properties only, so a tag like {constructor} or {__proto__} never resolves.
+    if (d && typeof d === 'object' && Object.hasOwn(d, name) && d[name] !== undefined) return d[name];
   }
   return undefined;
 }

@@ -3,22 +3,99 @@ import { randomUUID } from 'node:crypto';
 import { eq, desc, inArray } from 'drizzle-orm';
 import { db, schema } from '../db/client.js';
 import { FREQUENCIES, MAX_OCCURRENCES, recurrenceDates } from '../lib/recurrence.js';
+import {
+  FLOWS,
+  PAYMENT_STATUSES,
+  RECEIPT_STATUSES,
+  badId,
+  badRequest,
+  isOneOf,
+  optionalDate,
+  optionalId,
+  parseId,
+  parseIsoDateStrict,
+  parseMoney,
+} from '../lib/validate.js';
 
 // Fields a series-wide edit copies to the other payments of the series.
 const SERIES_SHARED_FIELDS = ['description', 'amount', 'categoryId', 'customerId', 'contractId'] as const;
 
-const ALLOWED = [
-  'customerId', 'contractId', 'invoiceId', 'categoryId', 'description', 'amount', 'flow',
-  'status', 'receiptStatus', 'installmentNumber', 'installmentCount', 'dueDate', 'paidDate', 'receivedDate',
+const ID_FIELDS = [
+  ['customerId', 'Cliente'],
+  ['contractId', 'Contrato'],
+  ['invoiceId', 'Fatura'],
+  ['categoryId', 'Categoria'],
+] as const;
+const DATE_FIELDS = [
+  ['dueDate', 'vencimento'],
+  ['paidDate', 'data de pagamento'],
+  ['receivedDate', 'data de recebimento'],
 ] as const;
 
-// Pick only known columns from the body; coerce the decimal amount to a string.
-function clean(body: any): Record<string, any> {
+// Validate + pick only the known columns from the body (the decimal amount becomes a
+// string). `partial` = update (every field optional); on create description and amount
+// are required. Returns the clean data or a pt-BR error message for a 400.
+function clean(body: any, partial: boolean): { data: Record<string, any> } | { error: string } {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { error: 'Dados inválidos.' };
   const out: Record<string, any> = {};
-  for (const k of ALLOWED) {
-    if (body?.[k] !== undefined) out[k] = k === 'amount' ? String(body[k] ?? 0) : body[k];
+
+  for (const [k, label] of ID_FIELDS) {
+    const v = optionalId(body[k]);
+    if (v === false) return { error: `${label} inválido.` };
+    if (v !== undefined) out[k] = v;
   }
-  return out;
+
+  if (body.description !== undefined) {
+    if (typeof body.description !== 'string' || body.description.trim() === '') {
+      return { error: 'A descrição é obrigatória.' };
+    }
+    if (body.description.length > 255) return { error: 'A descrição excede 255 caracteres.' };
+    out.description = body.description.trim();
+  } else if (!partial) {
+    return { error: 'A descrição é obrigatória.' };
+  }
+
+  if (body.amount !== undefined) {
+    const amount = parseMoney(body.amount, { emptyAs: 0 });
+    if (amount === null) return { error: 'Valor inválido.' };
+    // User-facing create: amount must be > 0. (On update the route compares with the
+    // stored amount, so legacy 0/negative payments can still have other fields edited.)
+    if (!partial && amount <= 0) return { error: 'Informe um valor maior que zero.' };
+    out.amount = String(amount);
+  } else if (!partial) {
+    return { error: 'O valor é obrigatório.' };
+  }
+
+  if (body.flow !== undefined) {
+    if (!isOneOf(FLOWS, body.flow)) return { error: 'Tipo inválido (use entrada ou saída).' };
+    out.flow = body.flow;
+  }
+  if (body.status !== undefined) {
+    if (!isOneOf(PAYMENT_STATUSES, body.status)) return { error: 'Situação inválida.' };
+    out.status = body.status;
+  }
+  if (body.receiptStatus !== undefined) {
+    if (!isOneOf(RECEIPT_STATUSES, body.receiptStatus)) return { error: 'Situação do recibo inválida.' };
+    out.receiptStatus = body.receiptStatus;
+  }
+
+  for (const k of ['installmentNumber', 'installmentCount'] as const) {
+    const v = body[k];
+    if (v === undefined) continue;
+    if (v === null || v === '') out[k] = null;
+    else {
+      const n = parseId(v);
+      if (n === null) return { error: 'Número de parcelas inválido.' };
+      out[k] = n;
+    }
+  }
+
+  for (const [k, label] of DATE_FIELDS) {
+    const v = optionalDate(body[k]);
+    if (v === false) return { error: `Data inválida (${label}).` };
+    if (v !== undefined) out[k] = v;
+  }
+  return { data: out };
 }
 
 export function registerPaymentRoutes(app: FastifyInstance) {
@@ -64,6 +141,10 @@ export function registerPaymentRoutes(app: FastifyInstance) {
       if (!FREQUENCIES.includes(rec.frequency) || !first || !rec.until) {
         return reply.code(400).send({ error: 'Informe a frequência, o vencimento e a data final da recorrência.' });
       }
+      // Real calendar dates only (2026-02-31 would otherwise silently roll over).
+      if (parseIsoDateStrict(first) === null || parseIsoDateStrict(rec.until) === null) {
+        return badRequest(reply, 'Data inválida na recorrência: informe datas reais do calendário.');
+      }
       const dates = recurrenceDates(first, rec.frequency, rec.until);
       if (dates.length === 0) {
         return reply.code(400).send({ error: 'A data final deve ser igual ou posterior ao primeiro vencimento.' });
@@ -72,7 +153,9 @@ export function registerPaymentRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: `A recorrência geraria mais de ${MAX_OCCURRENCES} pagamentos. Reduza o período.` });
       }
       const recurrenceId = randomUUID();
-      const base = clean(req.body);
+      const cleaned = clean(req.body, false);
+      if ('error' in cleaned) return badRequest(reply, cleaned.error);
+      const base = cleaned.data;
       // Every payment of a new series starts open (to pay / to receive).
       const rows = dates.map((dueDate) => ({
         ...base,
@@ -89,7 +172,9 @@ export function registerPaymentRoutes(app: FastifyInstance) {
       return reply.code(201).send({ recurrenceId, count: rows.length });
     }
 
-    const res: any = await db.insert(schema.payments).values(clean(req.body) as any).$returningId();
+    const cleaned = clean(req.body, false);
+    if ('error' in cleaned) return badRequest(reply, cleaned.error);
+    const res: any = await db.insert(schema.payments).values(cleaned.data as any).$returningId();
     const [row] = await db.select().from(schema.payments).where(eq(schema.payments.id, res[0].id));
     return reply.code(201).send(row);
   });
@@ -112,12 +197,22 @@ export function registerPaymentRoutes(app: FastifyInstance) {
   // shared fields (description, amount, category, customer, contract) to the other open
   // payments of the series; each keeps its own due date and situation.
   app.put('/api/payments/:id', async (req: any, reply) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === null) return badId(reply);
     const [before] = await db.select().from(schema.payments).where(eq(schema.payments.id, id));
-    if (!before) return reply.code(404).send({ error: 'not found' });
+    if (!before) return reply.code(404).send({ error: 'Pagamento não encontrado.' });
 
-    const data = clean(req.body);
-    await db.update(schema.payments).set(data).where(eq(schema.payments.id, id));
+    const cleaned = clean(req.body, true);
+    if ('error' in cleaned) return badRequest(reply, cleaned.error);
+    const data = cleaned.data;
+    // Amount must be > 0 when it is being changed; an unchanged legacy 0/negative is left alone.
+    if (data.amount !== undefined && Number(data.amount) <= 0 && Number(data.amount) !== Number(before.amount)) {
+      return badRequest(reply, 'Informe um valor maior que zero.');
+    }
+    // Nothing to change (e.g. only `scope` was sent): never call set({}).
+    if (Object.keys(data).length > 0) {
+      await db.update(schema.payments).set(data).where(eq(schema.payments.id, id));
+    }
 
     const others = await seriesTargets(before, String(req.body?.scope ?? ''));
     if (others.length > 0) {
@@ -134,7 +229,8 @@ export function registerPaymentRoutes(app: FastifyInstance) {
 
   // Delete a payment; `?scope=following|all` also deletes the other open payments of its series.
   app.delete('/api/payments/:id', async (req: any, reply) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === null) return badId(reply);
     const [row] = await db.select().from(schema.payments).where(eq(schema.payments.id, id));
     const ids = row ? [id, ...(await seriesTargets(row, String(req.query?.scope ?? '')))] : [id];
     await db.delete(schema.payments).where(inArray(schema.payments.id, ids));
