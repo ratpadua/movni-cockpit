@@ -1,0 +1,17 @@
+{
+  "name": "movni-cockpit-qa",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "QA scripts (API smoke tests + Playwright UI tests). Separate from the app: never bundled, never shipped.",
+  "scripts": {
+    "api": "node api/smoke.mjs",
+    "ui": "node ui/run-all.mjs",
+    "ui:desktop": "node ui/run-all.mjs --desktop-only",
+    "all": "npm run api && npm run ui",
+    "install:browser": "playwright install chromium"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.1"
+  }
+}

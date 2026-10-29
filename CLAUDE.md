@@ -24,7 +24,8 @@ movni-cockpit/
 ├─ server/src/
 │  ├─ db/        schema.ts, client.ts (connection), migrate.ts, seed.ts, reset.ts, add-columns.ts
 │  ├─ lib/       contract.ts (render docx/odt), odt.ts (ODT engine), pdf.ts (LibreOffice),
-│  │             ofx.ts, match.ts, crud.ts
+│  │             ofx.ts, crud.ts, validate.ts (input checks), http.ts (Content-Disposition),
+│  │             dates.ts, paths.ts
 │  └─ routes/    auth, contracts, customers, payments, receipts, services, settings, templates, bank
 ├─ server/drizzle/   generated SQL migrations (0000…)
 ├─ client/src/
@@ -32,6 +33,7 @@ movni-cockpit/
 │  ├─ components/    shared UI (DateField, PaymentFormModal, ContractFormModal, ResourceManager, …)
 │  └─ lib/           dates.ts, download.ts, paymentStatus.ts, status.ts, theme.ts
 ├─ scripts/package-win.ps1   builds the portable Windows bundle
+├─ qa/                       QA scripts: api/smoke.mjs + Playwright specs in ui/ (own package.json, never bundled)
 └─ storage/contracts/        generated documents (local to the machine that generated them)
 ```
 
@@ -120,7 +122,10 @@ npm start                  # build the client, then serve everything on :5178
       judges real improvements and explains any he declines. Repeat 2-3 until both agree (reviewer
       says APPROVED). If they still disagree after 3 rounds, stop and ask the owner to decide.
    4. **`qa-specialist`** runs the full verification pass (rule 2) and tests every new feature and
-      change on the **dev** database. Any bug goes back to the `developer`, then through the
+      change on the **dev** database, **both through the API and through the UI with a Playwright script**
+      (Chromium; scripts live in the project's `qa/` folder, see `qa/README.md`, and are never bundled; the
+      server's DB session is global, so DB credentials are never typed in the browser). QA keeps the
+      `qa/` tests up to date with each batch. Any bug goes back to the `developer`, then through the
       `code-reviewer` again for the fix, then back to QA. Repeat until QA says `VERDICT: APPROVED`.
    5. The batch / release is **ready only after QA approves**. Commits, pushes, packaging and
       production migrations still happen only when the owner asks.
@@ -290,7 +295,6 @@ Temporarily set `.env` `DB_NAME` to production **and** `.env.local` to the produ
 
 ## 9. Environment notes (Windows)
 
-- No admin rights and USB is blocked — install tools in user space.
 - A PowerShell safety hook blocks some destructive patterns (recursive removes, `/MIR`, …). Prefer
   explicit, narrow commands; use `[IO.Directory]::Delete(...)` for the rare cleanup of a known folder.
 - This folder is a git repository (`origin` = `ratpadua/movni-cockpit` on GitHub, public). Commits are
