@@ -73,39 +73,41 @@ export default function Dashboard() {
           <Title order={4} mb="sm" c="red">
             Pagamentos atrasados
           </Title>
-          <Table striped highlightOnHover>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Vencimento</Table.Th>
-                <Table.Th>Descrição</Table.Th>
-                <Table.Th>Cliente</Table.Th>
-                <Table.Th>Tipo</Table.Th>
-                <Table.Th ta="right">Valor</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {latePayments.map((p) => (
-                <Table.Tr
-                  key={p.id}
-                  style={{ cursor: p.contractId ? 'pointer' : 'default' }}
-                  onClick={() => p.contractId && navigate(`/contracts/${p.contractId}`)}
-                >
-                  <Table.Td c="red">{formatBr(p.dueDate)}</Table.Td>
-                  <Table.Td>
-                    {p.description}
-                    {p.contractNumber ? ` · ${p.contractNumber}` : ''}
-                  </Table.Td>
-                  <Table.Td>{p.customerNickname || p.customerName || '—'}</Table.Td>
-                  <Table.Td>
-                    <Badge color={p.flow === 'in' ? 'green' : 'red'} variant="light">
-                      {p.flow === 'in' ? 'Entrada' : 'Saída'}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td ta="right">{brl(Number(p.amount))}</Table.Td>
+          <Table.ScrollContainer minWidth={640}>
+            <Table striped highlightOnHover>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Vencimento</Table.Th>
+                  <Table.Th>Descrição</Table.Th>
+                  <Table.Th>Cliente</Table.Th>
+                  <Table.Th>Tipo</Table.Th>
+                  <Table.Th ta="right">Valor</Table.Th>
                 </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
+              </Table.Thead>
+              <Table.Tbody>
+                {latePayments.map((p) => (
+                  <Table.Tr
+                    key={p.id}
+                    style={{ cursor: p.contractId ? 'pointer' : 'default' }}
+                    onClick={() => p.contractId && navigate(`/contracts/${p.contractId}`)}
+                  >
+                    <Table.Td c="red">{formatBr(p.dueDate)}</Table.Td>
+                    <Table.Td>
+                      {p.description}
+                      {p.contractNumber ? ` · ${p.contractNumber}` : ''}
+                    </Table.Td>
+                    <Table.Td>{p.customerNickname || p.customerName || '—'}</Table.Td>
+                    <Table.Td>
+                      <Badge color={p.flow === 'in' ? 'green' : 'red'} variant="light">
+                        {p.flow === 'in' ? 'Entrada' : 'Saída'}
+                      </Badge>
+                    </Table.Td>
+                    <Table.Td ta="right">{brl(Number(p.amount))}</Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
         </Paper>
       )}
 
@@ -114,33 +116,35 @@ export default function Dashboard() {
           <Title order={4} mb="sm" c="red">
             Contratos atrasados
           </Title>
-          <Table striped highlightOnHover>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Contrato</Table.Th>
-                <Table.Th>Cliente</Table.Th>
-                <Table.Th>Status</Table.Th>
-                <Table.Th>Prazo</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {overdue.map((o) => (
-                <Table.Tr key={o.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/contracts/${o.id}`)}>
-                  <Table.Td fw={600}>
-                    {o.number ?? `#${o.id}`}
-                    {o.title ? ` — ${o.title}` : ''}
-                  </Table.Td>
-                  <Table.Td>{o.customerName ?? '—'}</Table.Td>
-                  <Table.Td>
-                    <Badge color="red" variant="light">
-                      {STATUS_LABELS[o.status]}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td c="red">{new Date(o.deadline).toLocaleDateString('pt-BR')}</Table.Td>
+          <Table.ScrollContainer minWidth={640}>
+            <Table striped highlightOnHover>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Contrato</Table.Th>
+                  <Table.Th>Cliente</Table.Th>
+                  <Table.Th>Status</Table.Th>
+                  <Table.Th>Prazo</Table.Th>
                 </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
+              </Table.Thead>
+              <Table.Tbody>
+                {overdue.map((o) => (
+                  <Table.Tr key={o.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/contracts/${o.id}`)}>
+                    <Table.Td fw={600}>
+                      {o.number ?? `#${o.id}`}
+                      {o.title ? ` — ${o.title}` : ''}
+                    </Table.Td>
+                    <Table.Td>{o.customerName ?? '—'}</Table.Td>
+                    <Table.Td>
+                      <Badge color="red" variant="light">
+                        {STATUS_LABELS[o.status]}
+                      </Badge>
+                    </Table.Td>
+                    <Table.Td c="red">{new Date(o.deadline).toLocaleDateString('pt-BR')}</Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
         </Paper>
       )}
 

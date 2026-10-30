@@ -63,3 +63,13 @@ baseline taken by `s0_login`.
   `node qa/ui/s9_cleanup.mjs` (it sweeps every `QAZ*` row, but compares with the baseline from the last
   `s0_login`); no bank-import records, customers, contracts or payments may stay behind.
 - Never put real credentials, DB names or IPs in these files - the repository is public.
+
+## Notes on the current suites
+
+- `api/smoke.mjs` section **P** covers the business rules: customer delete block (409 with counts), contract delete
+  (blocked when anything was received, credit reinstated exactly, files removed), contract edit (409 after a receipt,
+  re-split on the net total, 400 below the applied credit, extra payments kept), unique-number indexes, concurrent
+  creations, rollback and invoice edit/delete concurrency.
+- `ui/s8_responsive.mjs` asserts the layout at 375, 768, 991 and 992 px: no horizontal page scroll, burger/drawer below
+  992 px, side menu from 992 px.
+- With `DB_TARGET=local` every script uses the gitignored `.env.test` (local Docker MySQL) instead of the dev database.

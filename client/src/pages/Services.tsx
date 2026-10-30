@@ -233,97 +233,99 @@ export default function Services() {
       </Paper>
 
       <Paper withBorder radius="md">
-        <Table striped highlightOnHover>
-          <Table.Thead>
-            <Table.Tr>
-              <Table.Th>Serviço</Table.Th>
-              <Table.Th>Versão atual</Table.Th>
-              <Table.Th ta="right">Preço base</Table.Th>
-              <Table.Th>Adicionais</Table.Th>
-              <Table.Th style={{ width: 160 }} />
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {isLoading && (
+        <Table.ScrollContainer minWidth={640}>
+          <Table striped highlightOnHover>
+            <Table.Thead>
               <Table.Tr>
-                <Table.Td colSpan={5}>Carregando…</Table.Td>
+                <Table.Th>Serviço</Table.Th>
+                <Table.Th>Versão atual</Table.Th>
+                <Table.Th ta="right">Preço base</Table.Th>
+                <Table.Th>Adicionais</Table.Th>
+                <Table.Th style={{ width: 160 }} />
               </Table.Tr>
-            )}
-            {!isLoading && visible.length === 0 && (
-              <Table.Tr>
-                <Table.Td colSpan={5}>
-                  <Text c="dimmed">
-                    {services.length === 0 ? 'Nenhum serviço cadastrado.' : 'Nenhum serviço encontrado.'}
-                  </Text>
-                </Table.Td>
-              </Table.Tr>
-            )}
-            {visible.map((s) => (
-              <Table.Tr key={s.id} style={{ cursor: 'pointer' }} onClick={() => setHistoryId(s.id)}>
-                <Table.Td>
-                  <Text fw={500}>{s.name}</Text>
-                  {s.description && (
-                    <Text size="xs" c="dimmed">
-                      {s.description}
+            </Table.Thead>
+            <Table.Tbody>
+              {isLoading && (
+                <Table.Tr>
+                  <Table.Td colSpan={5}>Carregando…</Table.Td>
+                </Table.Tr>
+              )}
+              {!isLoading && visible.length === 0 && (
+                <Table.Tr>
+                  <Table.Td colSpan={5}>
+                    <Text c="dimmed">
+                      {services.length === 0 ? 'Nenhum serviço cadastrado.' : 'Nenhum serviço encontrado.'}
                     </Text>
-                  )}
-                </Table.Td>
-                <Table.Td>
-                  <Badge variant="light">v{s.currentVersion?.version ?? '—'}</Badge>
-                </Table.Td>
-                <Table.Td ta="right">{brl(Number(s.currentVersion?.basePrice ?? 0))}</Table.Td>
-                <Table.Td>
-                  {(s.currentVersion?.additionals ?? []).length === 0 ? (
-                    <Text size="xs" c="dimmed">
-                      —
-                    </Text>
-                  ) : (
-                    <Group gap={4}>
-                      {s.currentVersion!.additionals.map((a) => (
-                        <Badge key={a.id} variant="dot" color="grape">
-                          {a.name} · {brl(Number(a.price))}
-                        </Badge>
-                      ))}
+                  </Table.Td>
+                </Table.Tr>
+              )}
+              {visible.map((s) => (
+                <Table.Tr key={s.id} style={{ cursor: 'pointer' }} onClick={() => setHistoryId(s.id)}>
+                  <Table.Td>
+                    <Text fw={500}>{s.name}</Text>
+                    {s.description && (
+                      <Text size="xs" c="dimmed">
+                        {s.description}
+                      </Text>
+                    )}
+                  </Table.Td>
+                  <Table.Td>
+                    <Badge variant="light">v{s.currentVersion?.version ?? '—'}</Badge>
+                  </Table.Td>
+                  <Table.Td ta="right">{brl(Number(s.currentVersion?.basePrice ?? 0))}</Table.Td>
+                  <Table.Td>
+                    {(s.currentVersion?.additionals ?? []).length === 0 ? (
+                      <Text size="xs" c="dimmed">
+                        —
+                      </Text>
+                    ) : (
+                      <Group gap={4}>
+                        {s.currentVersion!.additionals.map((a) => (
+                          <Badge key={a.id} variant="dot" color="grape">
+                            {a.name} · {brl(Number(a.price))}
+                          </Badge>
+                        ))}
+                      </Group>
+                    )}
+                  </Table.Td>
+                  <Table.Td onClick={(e) => e.stopPropagation()}>
+                    <Group gap={2} justify="flex-end" wrap="nowrap">
+                      <ActionIcon variant="subtle" title="Nova versão (novo preço)" onClick={() => openNewVersion(s)}>
+                        <IconVersions size={16} />
+                      </ActionIcon>
+                      <ActionIcon variant="subtle" title="Ver detalhes" onClick={() => setHistoryId(s.id)}>
+                        <IconHistory size={16} />
+                      </ActionIcon>
+                      <ActionIcon
+                        variant="subtle"
+                        title="Editar"
+                        onClick={() => {
+                          setRenameTarget(s);
+                          setRenameName(s.name);
+                          setRenameDesc(s.description ?? '');
+                          setNewAddName('');
+                          setNewAddPrice(0);
+                        }}
+                      >
+                        <IconEdit size={16} />
+                      </ActionIcon>
+                      <ActionIcon
+                        variant="subtle"
+                        color="red"
+                        title="Excluir"
+                        onClick={() => {
+                          if (confirm('Excluir este serviço e todas as versões?')) remove.mutate(s.id);
+                        }}
+                      >
+                        <IconTrash size={16} />
+                      </ActionIcon>
                     </Group>
-                  )}
-                </Table.Td>
-                <Table.Td onClick={(e) => e.stopPropagation()}>
-                  <Group gap={2} justify="flex-end" wrap="nowrap">
-                    <ActionIcon variant="subtle" title="Nova versão (novo preço)" onClick={() => openNewVersion(s)}>
-                      <IconVersions size={16} />
-                    </ActionIcon>
-                    <ActionIcon variant="subtle" title="Ver detalhes" onClick={() => setHistoryId(s.id)}>
-                      <IconHistory size={16} />
-                    </ActionIcon>
-                    <ActionIcon
-                      variant="subtle"
-                      title="Editar"
-                      onClick={() => {
-                        setRenameTarget(s);
-                        setRenameName(s.name);
-                        setRenameDesc(s.description ?? '');
-                        setNewAddName('');
-                        setNewAddPrice(0);
-                      }}
-                    >
-                      <IconEdit size={16} />
-                    </ActionIcon>
-                    <ActionIcon
-                      variant="subtle"
-                      color="red"
-                      title="Excluir"
-                      onClick={() => {
-                        if (confirm('Excluir este serviço e todas as versões?')) remove.mutate(s.id);
-                      }}
-                    >
-                      <IconTrash size={16} />
-                    </ActionIcon>
-                  </Group>
-                </Table.Td>
-              </Table.Tr>
-            ))}
-          </Table.Tbody>
-        </Table>
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
       </Paper>
 
       {/* create / new-version modal */}

@@ -89,7 +89,8 @@ await S.flow('Clientes: lista e ResourceManager (criar/editar/excluir/validacao)
   const stillThere = (await custs()).some((x) => x.id === inUse.id);
   const ctAfter = (await api('GET', `/api/contracts/${ct.id}`)).body;
   console.log('  delete customer with contract -> toasts', JSON.stringify(toasts), 'customer still exists:', stillThere, 'contract customerId now:', ctAfter.customerId);
-  L.known('deleting a customer that has contracts is blocked with a message OR keeps contracts linked (no orphaned contract) [KNOWN: contracts.customer_id is ON DELETE SET NULL]', stillThere || (ctAfter.customerId != null), `customer deleted, contract ${ct.number} orphaned (customerId=${ctAfter.customerId}); toasts=${JSON.stringify(toasts)}; confirm text=${JSON.stringify(S.dialogs)}`);
+  ok('customer with a contract is NOT deleted (still listed, contract keeps its customer)', stillThere && ctAfter.customerId === inUse.id, JSON.stringify({ stillThere, customerId: ctAfter.customerId }));
+  ok('UI toast shows the pt-BR block message with counts ("Não é possível excluir: o cliente tem ... contrato(s)")', toasts.some((x) => /Não é possível excluir: o cliente tem .*contrato\(s\)/.test(x)), JSON.stringify(toasts));
   await L.shot(page, 'clientes_excluir_em_uso');  S.expectBad.push(/409|400|500 DELETE \/api\/customers/, /DELETE \/api\/customers/);
 });
 

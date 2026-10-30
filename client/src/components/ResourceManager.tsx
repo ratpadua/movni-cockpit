@@ -254,65 +254,67 @@ export default function ResourceManager({
       )}
 
       <Paper withBorder radius="md">
-        <Table striped highlightOnHover>
-          <Table.Thead>
-            <Table.Tr>
-              {tableFields.map((f) => (
-                <Table.Th key={f.key}>{f.label}</Table.Th>
-              ))}
-              {extraColumns.map((c) => (
-                <Table.Th key={c.label}>{c.label}</Table.Th>
-              ))}
-              <Table.Th style={{ width: 90 }} />
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {isLoading && (
+        <Table.ScrollContainer minWidth={640}>
+          <Table striped highlightOnHover>
+            <Table.Thead>
               <Table.Tr>
-                <Table.Td colSpan={tableFields.length + extraColumns.length + 1}>Carregando…</Table.Td>
-              </Table.Tr>
-            )}
-            {!isLoading && data.length === 0 && (
-              <Table.Tr>
-                <Table.Td colSpan={tableFields.length + extraColumns.length + 1}>
-                  <Text c="dimmed">Nenhum registro.</Text>
-                </Table.Td>
-              </Table.Tr>
-            )}
-            {data.map((row) => (
-              <Table.Tr
-                key={row.id}
-                style={onRowClick ? { cursor: 'pointer' } : undefined}
-                onClick={onRowClick ? () => onRowClick(row) : undefined}
-              >
                 {tableFields.map((f) => (
-                  <Table.Td key={f.key}>
-                    {f.format ? f.format(row) : formatCell(f, row[f.key])}
-                  </Table.Td>
+                  <Table.Th key={f.key}>{f.label}</Table.Th>
                 ))}
                 {extraColumns.map((c) => (
-                  <Table.Td key={c.label}>{c.render(row)}</Table.Td>
+                  <Table.Th key={c.label}>{c.label}</Table.Th>
                 ))}
-                <Table.Td onClick={(e) => e.stopPropagation()}>
-                  <Group gap={4} justify="flex-end">
-                    <ActionIcon variant="subtle" onClick={() => openEdit(row)}>
-                      <IconEdit size={16} />
-                    </ActionIcon>
-                    <ActionIcon
-                      variant="subtle"
-                      color="red"
-                      onClick={() => {
-                        if (confirm('Excluir este registro?')) remove.mutate(row.id);
-                      }}
-                    >
-                      <IconTrash size={16} />
-                    </ActionIcon>
-                  </Group>
-                </Table.Td>
+                <Table.Th style={{ width: 90 }} />
               </Table.Tr>
-            ))}
-          </Table.Tbody>
-        </Table>
+            </Table.Thead>
+            <Table.Tbody>
+              {isLoading && (
+                <Table.Tr>
+                  <Table.Td colSpan={tableFields.length + extraColumns.length + 1}>Carregando…</Table.Td>
+                </Table.Tr>
+              )}
+              {!isLoading && data.length === 0 && (
+                <Table.Tr>
+                  <Table.Td colSpan={tableFields.length + extraColumns.length + 1}>
+                    <Text c="dimmed">Nenhum registro.</Text>
+                  </Table.Td>
+                </Table.Tr>
+              )}
+              {data.map((row) => (
+                <Table.Tr
+                  key={row.id}
+                  style={onRowClick ? { cursor: 'pointer' } : undefined}
+                  onClick={onRowClick ? () => onRowClick(row) : undefined}
+                >
+                  {tableFields.map((f) => (
+                    <Table.Td key={f.key}>
+                      {f.format ? f.format(row) : formatCell(f, row[f.key])}
+                    </Table.Td>
+                  ))}
+                  {extraColumns.map((c) => (
+                    <Table.Td key={c.label}>{c.render(row)}</Table.Td>
+                  ))}
+                  <Table.Td onClick={(e) => e.stopPropagation()}>
+                    <Group gap={4} justify="flex-end">
+                      <ActionIcon variant="subtle" onClick={() => openEdit(row)}>
+                        <IconEdit size={16} />
+                      </ActionIcon>
+                      <ActionIcon
+                        variant="subtle"
+                        color="red"
+                        onClick={() => {
+                          if (confirm('Excluir este registro?')) remove.mutate(row.id);
+                        }}
+                      >
+                        <IconTrash size={16} />
+                      </ActionIcon>
+                    </Group>
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
       </Paper>
 
       <Modal opened={opened} onClose={() => setOpened(false)} title={editing ? 'Editar' : 'Novo'}>

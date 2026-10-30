@@ -9,7 +9,7 @@ import { schema, isConnected } from './db/client.js';
 import { PROJECT_ROOT } from './lib/paths.js';
 import { CONTACT_METHODS, FLOWS, parseId } from './lib/validate.js';
 import { registerAuthRoutes } from './routes/auth.js';
-import { registerCustomerRoutes } from './routes/customers.js';
+import { registerCustomerRoutes, customerDeleteBlock } from './routes/customers.js';
 import { registerCrud } from './lib/crud.js';
 import { registerBankRoutes } from './routes/bank.js';
 import { registerContractRoutes } from './routes/contracts.js';
@@ -131,6 +131,9 @@ registerCrud(app, '/api/customers', schema.customers, {
   whatsapp: { kind: 'string', label: 'WhatsApp', max: 64 },
   preferredContact: { kind: 'enum', label: 'Contato preferido', values: CONTACT_METHODS },
   document: { kind: 'string', label: 'Documento', max: 64 },
+}, {
+  // Business rule: a customer with contracts, payments or credits cannot be deleted.
+  beforeDelete: customerDeleteBlock,
 });
 registerCrud(app, '/api/categories', schema.categories, {
   name: { kind: 'string', label: 'Nome', max: 255, required: true },

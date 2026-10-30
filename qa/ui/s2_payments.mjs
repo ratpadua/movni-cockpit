@@ -58,7 +58,7 @@ await flow('Fluxo de Caixa: periodo e filtros', async () => {
   ok(`period label "${cap}"`, await page.getByText(cap, { exact: true }).first().isVisible(), cap);
   let t = await U.bodyText(page);
   ok('current month: open/paid payments of month visible, Sept & Dec not', /QAZ-UI entrada aberta/.test(t) && /QAZ-UI saida paga/.test(t) && !/QAZ-UI entrada atrasada/.test(t) && !/QAZ-UI proximo mes/.test(t));
-  ok('dates are dd/MM/yyyy in rows', t.includes(L.br(L.addDays(today, 2))));
+  ok('dates are dd/MM/yyyy in rows', t.includes(L.br(st.pOpenIn.dueDate)));
   ok('Tipo filter present, Situação labels', /Situação/.test(t));
   await L.shot(page, 'fluxo_caixa_desktop');
   await page.getByRole('button', { name: 'Mês anterior' }).click();
@@ -198,6 +198,7 @@ await flow('Fluxo de Caixa: novo pagamento', async () => {
   await L.shot(page, 'pagamento_modal_datepicker');
   await d.getByRole('button', { name: 'Salvar' }).click();
   await U.toast(page, /Pagamento salvo/);
+  await page.waitForTimeout(900);
   const p2 = (await listPayments()).find((p) => p.description === 'QAZ-UI pagamento data escolhida');
   ok('API: picked date stored as same day (yyyy-MM-20)', p2 && p2.dueDate === shownPicked.split('/').reverse().join('-'), JSON.stringify(p2?.dueDate) + ' vs ' + shownPicked);
 });
@@ -315,7 +316,7 @@ await flow('Fluxo de Caixa: editar Situacao, receber, excluir, recibo', async ()
   const sitIn = await U.optionsOf(page, d, 'Situação'); await U.closeDropdown(page);
   ok('entrada Situação options alphabetical & labels (Aberto, Enviado, Recebido)', JSON.stringify(sitIn) === JSON.stringify(['Aberto', 'Enviado', 'Recebido']), JSON.stringify(sitIn));
   d = U.dlg(page);
-  ok('edit modal: date shown dd/MM/yyyy', (await d.getByLabel('Vencimento').first().inputValue()) === L.br(L.addDays(today, 2)));
+  ok('edit modal: date shown dd/MM/yyyy', (await d.getByLabel('Vencimento').first().inputValue()) === L.br(st.pOpenIn.dueDate));
   await L.shot(page, 'pagamento_modal_editar');
   await U.pickOption(page, d, 'Situação', 'Recebido');
   await d.getByLabel('Data de recebimento').waitFor();

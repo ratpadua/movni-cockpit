@@ -9,6 +9,7 @@ import {
   timestamp,
   mysqlEnum,
   customType,
+  uniqueIndex,
 } from 'drizzle-orm/mysql-core';
 import { relations } from 'drizzle-orm';
 
@@ -142,7 +143,12 @@ export const contracts = mysqlTable('contracts', {
   installments: int('installments').notNull().default(1),
   total: decimal('total', { precision: 12, scale: 2 }).notNull().default('0'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
-});
+}, (t) => ({
+  // Numbers are allocated max+1 (global sequence per year / F###); the unique index
+  // makes a concurrent duplicate fail so creation can retry with the next number.
+  // MySQL allows several NULLs (old rows without a number).
+  number: uniqueIndex('contracts_number_uq').on(t.number),
+}));
 
 export const contractItems = mysqlTable('contract_items', {
   id: int('id').autoincrement().primaryKey(),
@@ -179,7 +185,10 @@ export const invoices = mysqlTable('invoices', {
   installments: int('installments').notNull().default(1),
   total: decimal('total', { precision: 12, scale: 2 }).notNull().default('0'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
-});
+}, (t) => ({
+  // The NNN-YY reference is one global sequence per year (not per contract).
+  refNumber: uniqueIndex('invoices_ref_number_uq').on(t.refNumber),
+}));
 
 // Additionals chosen for a contract item, with quantity + per-additional discount.
 // (Short SQL table name keeps auto-generated FK identifiers under MySQL's 64-char limit.)

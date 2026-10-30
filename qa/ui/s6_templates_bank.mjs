@@ -190,9 +190,7 @@ await S.flow('Importar extrato (OFX)', async () => {
   eq('bank_imports recorded (1)', await impCount(), 1);
   ok('UI reset after import (preview gone, empty-state alert back)', /Carregue um arquivo/.test(await U.bodyText(page)));
   await L.shot(page, 'extrato_apos_importar');
-  // re-upload -> Já importado. (The file input still holds the previous file and a browser fires no change event when the
-  // same file is picked again, so clear it first. Product note: FileButton has no resetRef.)
-  await page.locator('input[type=file]').setInputFiles([]);
+  // re-upload the SAME file in the same page session -> preview again (the input is reset after each selection)
   await page.locator('input[type=file]').setInputFiles(f);
   await page.getByText(/Arquivo:/).waitFor();
   await page.waitForTimeout(600);

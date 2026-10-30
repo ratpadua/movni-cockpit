@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   Stack,
   Title,
@@ -114,7 +114,10 @@ export default function BankImport() {
     onError: (e: Error) => notifications.show({ message: e.message, color: 'red' }),
   });
 
+  const resetFileRef = useRef<() => void>(null);
   const onFile = (file: File | null) => {
+    // clear the input so choosing the same file again fires onChange
+    resetFileRef.current?.();
     if (!file) return;
     setFileName(file.name);
     const reader = new FileReader();
@@ -167,7 +170,7 @@ export default function BankImport() {
       <Group justify="space-between">
         <Title order={2}>Extratos bancários</Title>
         <Group>
-          <FileButton onChange={onFile} accept=".ofx,.OFX">
+          <FileButton resetRef={resetFileRef} onChange={onFile} accept=".ofx,.OFX">
             {(props) => (
               <Button {...props} variant="default" leftSection={<IconUpload size={16} />} loading={parse.isPending}>
                 Carregar OFX

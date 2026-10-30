@@ -683,6 +683,148 @@ await S.flow('Fix 3 - Dinheiro: Ctrl+V real com a area de transferencia', async 
   await typeMoney(min, String(orig.minInstallmentValue).replace('.', ','));
 });
 
+await S.flow('Fix 13 - Colar com prefixo R$ fora da selecao e selecao parcial', async () => {
+  await S.context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: L.BASE });
+  await U.go(page, '/payments', 'Fluxo de Caixa');
+  await page.getByRole('button', { name: 'Novo pagamento' }).click();
+  const d = U.dlg(page);
+  const v = d.getByLabel('Valor (R$)');
+  const paste = async (text, from, to) => {
+    await page.evaluate((t) => navigator.clipboard.writeText(t), text);
+    await v.focus();
+    await v.evaluate((el, [a, b]) => el.setSelectionRange(a, b), [from, to]);
+    await page.keyboard.press('Control+v');
+    await v.press('Tab');
+    return sp(await v.inputValue());
+  };
+  await typeMoney(v, '55,5');
+  const len = (await v.inputValue()).length;
+  eq('digits selected, "R$ " prefix left unselected: Ctrl+V "1234.56" -> R$ 1.234,56', await paste('1234.56', 3, len), 'R$ 1.234,56');
+  await typeMoney(v, '1234,56');
+  const full = (await v.inputValue()).length;
+  const mid = await paste('99.5', 4, 6);
+  ok('partial / mid-text selection falls back to the default paste (not converted to R$ 99,50)', mid !== 'R$ 99,50' && mid !== 'R$ 99,5', 'shows "' + mid + '"');
+  await U.closeModal(page);
+});
+
+await S.flow('Contratos: excluir e editar com recebimento (UI)', async () => {
+  const cuD = must(await api('POST', '/api/customers', { name: 'QAZ Fix Cliente Excluir' }), 'customer');
+  const cr = must(await api('POST', `/api/customers/${cuD.id}/credits`, { description: 'QAZ Fix credito excluir', value: '100' }), 'credit');
+  const base = { customerId: cuD.id, type: 'contract', items: [{ serviceVersionId: svFv }], templateId: st.tC.id, receiptTemplateId: st.tR.id, installments: 2, dueDates: [L.addDays(today, 10), L.addDays(today, 40)] };
+  const CX = must(await api('POST', '/api/contracts', base), 'contract with receipt');
+  const CY = must(await api('POST', '/api/contracts', { ...base, creditId: cr.id }), 'contract with credit');
+  const instX = (await api('GET', `/api/contracts/${CX.id}`)).body.payments.filter((p) => p.installmentNumber);
+  must(await api('PUT', `/api/payments/${instX[0].id}`, { receiptStatus: 'received', receivedDate: today }), 'receive');
+  const remBefore = Number((await api('GET', `/api/customers/${cuD.id}/credits?all=1`)).body.find((c) => c.id === cr.id).remaining);
+  ok('setup: contract CY consumed part of the credit', remBefore < 100, String(remBefore));
+  // delete blocked (UI): toast with the server message, contract stays
+  await U.go(page, '/contracts', 'Contratos');
+  await U.clearToasts(page);
+  S.expectBad.push(/409 DELETE \/api\/contracts/);
+  await U.row(page, CX.number).getByTitle('Excluir').click();
+  ok('UI: delete with a received payment shows the block message', await U.toast(page, /Não é possível excluir: já há pagamento\(s\) recebido\(s\)\/pago\(s\)/), JSON.stringify(await U.toastTexts(page)));
+  eq('contract with receipt still exists', (await api('GET', `/api/contracts/${CX.id}`)).status, 200);
+  // delete allowed (UI) + credit reinstated exactly
+  await U.clearToasts(page);
+  await U.row(page, CY.number).getByTitle('Excluir').click();
+  await page.waitForTimeout(1200);
+  eq('UI: contract without receipt deleted (404 afterwards)', (await api('GET', `/api/contracts/${CY.id}`)).status, 404);
+  eq('credit remaining restored EXACTLY to 100', Number((await api('GET', `/api/customers/${cuD.id}/credits?all=1`)).body.find((c) => c.id === cr.id).remaining), 100);
+  // edit after a receipt: yellow notice, header-only save
+  await page.reload(); await page.waitForLoadState('networkidle');
+  await U.row(page, CX.number).getByTitle('Editar').click();
+  const e = U.dlg(page);
+  await e.getByText(/Editar contrato #/).first().waitFor();
+  const notice = e.getByText(/Já há pagamento\(s\) recebido\(s\) neste contrato: serviço, valores e parcelas não podem ser alterados/);
+  await notice.waitFor({ timeout: 8000 }).catch(() => {}); // the notice depends on the contract data loading
+  ok('edit form shows the yellow notice about received payments', await notice.isVisible());
+  await L.shot(page, 'contrato_editar_apos_recebimento');
+  const snapP = async () => JSON.stringify((await q('select amount, due_date, installment_number, receipt_status from payments where contract_id = ? order by id', [CX.id]))[0]);
+  const p0 = await snapP();
+  await e.getByLabel('Comentários').fill('QAZ Fix comentario cabecalho');
+  await e.getByRole('button', { name: 'Salvar' }).click();
+  ok('toast "Contrato salvo"', await U.toast(page, /Contrato salvo/));
+  await page.waitForTimeout(900);
+  const cx2 = (await api('GET', `/api/contracts/${CX.id}`)).body;
+  ok('API: header-only save: comments changed, installments/items untouched', cx2.comments === 'QAZ Fix comentario cabecalho' && (await snapP()) === p0, await snapP());
+  // cleanup of the received contract (blocked by the API on purpose): remove through SQL
+  await q('delete from contracts where id = ?', [CX.id]);
+});
+
+await S.flow('Fatura: excluir bloqueado apos recebimento / permitido antes (UI)', async () => {
+  r2 = (await api('GET', `/api/contracts/${R2.id}`)).body;
+  const fat = r2.invoices.find((i) => i.reference === 'QAZ Fix Fatura');
+  const payF = (await q('select id from payments where invoice_id = ? order by id', [fat.id]))[0];
+  const remBefore = Number((await api('GET', `/api/customers/${cuF.id}/credits?all=1`)).body.find((c) => c.id === crUsed.id).remaining);
+  must(await api('PUT', `/api/payments/${payF[0].id}`, { receiptStatus: 'received', receivedDate: today }), 'receive fatura payment');
+  const snap = async () => JSON.stringify([(await q('select id, amount, receipt_status from payments where invoice_id = ? order by id', [fat.id]))[0], (await q('select count(*) c from invoices where id = ?', [fat.id]))[0][0].c, Number((await api('GET', `/api/customers/${cuF.id}/credits?all=1`)).body.find((c) => c.id === crUsed.id).remaining)]);
+  const s0 = await snap();
+  await U.go(page, `/contracts/${R2.id}`, undefined);
+  await page.getByText('Faturas').first().waitFor();
+  const card = () => page.locator('.mantine-Paper-root').filter({ hasText: fat.refNumber }).last();
+  S.expectBad.push(/409 DELETE \/api\/invoices/);
+  await U.clearToasts(page);
+  await card().getByTitle('Excluir fatura').click();
+  ok('UI: toast shows the pt-BR block message about received payments and the rescisão process', await U.toast(page, /Não é possível excluir: já há pagamento\(s\) recebido\(s\) nesta fatura\. Para cancelar uma fatura com pagamentos recebidos será necessário o processo de rescisão \(ainda não implementado\)\./), JSON.stringify(await U.toastTexts(page)));
+  await L.shot(page, 'fatura_excluir_bloqueado');
+  eq('fatura, its payments and the credit are unchanged after the refused delete', await snap(), s0);
+  ok('the fatura card is still on screen', await card().count() > 0);
+  // re-open the payment: the delete is allowed and the credit is reinstated
+  must(await api('PUT', `/api/payments/${payF[0].id}`, { receiptStatus: 'open', receivedDate: null }), 'reopen');
+  await page.reload(); await page.getByText('Faturas').first().waitFor();
+  await U.clearToasts(page);
+  await card().getByTitle('Excluir fatura').click();
+  await page.waitForTimeout(1200);
+  eq('UI: fatura deleted once nothing is received', (await q('select count(*) c from invoices where id = ?', [fat.id]))[0][0].c, 0);
+  const remAfter = Number((await api('GET', `/api/customers/${cuF.id}/credits?all=1`)).body.find((c) => c.id === crUsed.id).remaining);
+  eq('credit reinstated (back to its full 510)', remAfter, 510);
+  ok('its installment payments are gone', (await q('select count(*) c from payments where invoice_id = ?', [fat.id]))[0][0].c === 0);
+});
+
+await S.flow('Contrato novo: com credito, sem credito e troca de cliente (UI)', async () => {
+  const cuA = must(await api('POST', '/api/customers', { name: 'QAZ Fix Cliente Credito' }), 'customer A');
+  const cuB = must(await api('POST', '/api/customers', { name: 'QAZ Fix Cliente Sem Credito' }), 'customer B');
+  const crA = must(await api('POST', `/api/customers/${cuA.id}/credits`, { description: 'QAZ Fix credito A', value: '120' }), 'credit A');
+  const fill = async (d, customer) => {
+    if ((await d.getByLabel('Cliente').first().inputValue()) !== customer) await U.pickOption(page, d, 'Cliente', customer); // picking the selected option again would deselect it
+    if (!(await d.getByLabel('Serviço (título do contrato)').first().inputValue())) await U.pickOption(page, d, 'Serviço (título do contrato)', 'QAZ Fix Servico');
+    await d.getByText(/Preço base: R\$\s?450,00/).waitFor();
+    if (!(await d.getByLabel('Modelo do documento').first().inputValue())) await U.pickOption(page, d, 'Modelo do documento', 'QAZ Modelo Contrato');
+    if (!(await d.getByLabel('Modelo do recibo').first().inputValue())) await U.pickOption(page, d, 'Modelo do recibo', 'QAZ Modelo Recibo');
+  };
+  const newest = async (cid) => { const l = (await api('GET', '/api/contracts')).body.filter((c) => c.customerId === cid).sort((a, b) => b.id - a.id)[0]; return l && (await api('GET', `/api/contracts/${l.id}`)).body; };
+  await U.go(page, '/contracts', 'Contratos');
+  // (1) WITH a credit
+  await page.getByRole('button', { name: 'Novo contrato' }).click();
+  let d = U.dlg(page);
+  await fill(d, 'QAZ Fix Cliente Credito');
+  await U.pickOption(page, d, 'Usar crédito do cliente', /QAZ Fix credito A/);
+  eq('credit selected', sp(await d.getByLabel('Usar crédito do cliente').first().inputValue()).includes('QAZ Fix credito A'), true);
+  // (2) switch customer: the credit selection is dropped and the other customer has none
+  await U.pickOption(page, d, 'Cliente', 'QAZ Fix Cliente Sem Credito');
+  eq('switching customer clears the credit selection', await d.getByLabel('Usar crédito do cliente').count() === 0 || (await d.getByLabel('Usar crédito do cliente').first().inputValue()) === '', true);
+  await fill(d, 'QAZ Fix Cliente Sem Credito');
+  await d.getByRole('button', { name: 'Salvar' }).click();
+  ok('(without credit, after switching customers) toast "Contrato salvo"', await U.toast(page, /Contrato salvo/));
+  await page.waitForTimeout(800);
+  const cB = await newest(cuB.id);
+  ok('API: contract of customer B created with NO credit applied', cB && Number(cB.creditApplied || 0) === 0, JSON.stringify(cB && [cB.customerId, cB.creditApplied]));
+  eq('credit A untouched (still 120)', Number((await api('GET', `/api/customers/${cuA.id}/credits?all=1`)).body.find((c) => c.id === crA.id).remaining), 120);
+  // (3) WITH the credit of the selected customer
+  await page.getByRole('button', { name: 'Novo contrato' }).click();
+  d = U.dlg(page);
+  await fill(d, 'QAZ Fix Cliente Credito');
+  await U.pickOption(page, d, 'Usar crédito do cliente', /QAZ Fix credito A/);
+  await d.getByRole('button', { name: 'Salvar' }).click();
+  ok('(with credit) toast "Contrato salvo"', await U.toast(page, /Contrato salvo/));
+  await page.waitForTimeout(800);
+  const cA = await newest(cuA.id);
+  ok('API: contract of customer A has the credit applied (120)', cA && Number(cA.creditApplied) === 120, JSON.stringify(cA && cA.creditApplied));
+  eq('credit A consumed', Number((await api('GET', `/api/customers/${cuA.id}/credits?all=1`)).body.find((c) => c.id === crA.id).remaining), 0);
+  await L.shot(page, 'contrato_novo_com_credito');
+  // (recurring contract creation through the modal is covered by s4_recurring)
+});
+
 await S.flow('Painel e telas principais (fumaca)', async () => {
   for (const [p, h] of [['/', 'Painel'], ['/payments', 'Fluxo de Caixa'], ['/contracts', 'Contratos'], ['/customers', 'Clientes'], ['/services', 'Serviços'], ['/templates', 'Modelos'], ['/bank', 'Extratos bancários'], ['/reports', 'Relatórios'], ['/settings', 'Aparência']]) {
     await U.go(page, p, h);

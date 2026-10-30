@@ -3,6 +3,25 @@ import { eq, and, gt, desc, sql } from 'drizzle-orm';
 import { db, schema } from '../db/client.js';
 import { badId, parseId, parseMoney } from '../lib/validate.js';
 
+// Delete guard for customers (used by the generic CRUD): refuse while the customer
+// still has contracts, payments or credits. Returns the pt-BR message, or null.
+export async function customerDeleteBlock(customerId: number): Promise<string | null> {
+  const count = async (table: any, col: any) => {
+    const [row] = await db.select({ n: sql<number>`count(*)` }).from(table).where(eq(col, customerId));
+    return Number(row?.n ?? 0);
+  };
+  const contracts = await count(schema.contracts, schema.contracts.customerId);
+  const payments = await count(schema.payments, schema.payments.customerId);
+  const credits = await count(schema.customerCredits, schema.customerCredits.customerId);
+  if (contracts + payments + credits === 0) return null;
+  const parts: string[] = [];
+  if (contracts > 0) parts.push(`${contracts} contrato(s)`);
+  if (payments > 0) parts.push(`${payments} pagamento(s)`);
+  if (credits > 0) parts.push(`${credits} crédito(s)`);
+  const list = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} e ${parts[parts.length - 1]}` : parts[0];
+  return `Não é possível excluir: o cliente tem ${list}.`;
+}
+
 export function registerCustomerRoutes(app: FastifyInstance) {
   // List a customer's credits. ?all=1 includes fully-used ones (remaining = 0).
   app.get('/api/customers/:id/credits', async (req: any, reply) => {

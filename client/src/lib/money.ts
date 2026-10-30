@@ -16,12 +16,18 @@ export function dotDecimalToPtBr(text: string): string | null {
 // would become 123456, a silent 100x error). For an unambiguous dot-decimal paste that REPLACES the whole
 // content (empty field or everything selected) we cancel the paste and set the comma-decimal text through the
 // native value setter + an 'input' event, which is what react-number-format / Mantine NumberInput listen to.
-// Everything else (other text, partial selection / caret inside the text, read-only) keeps the default paste.
+// "Whole" also covers a selection that ends at the end of the value and covers every digit (it starts at or
+// before the prefix length, so the 'R$ ' prefix may be left unselected). Everything else (other text, partial or
+// mid-text selection / caret inside the digits, read-only) keeps the default paste.
 // Note: the converted paste resets the field's native Ctrl+Z history.
 export function onMoneyPaste(e: ClipboardEvent<HTMLInputElement>) {
   const input = e.currentTarget;
   if (input.readOnly || input.disabled) return;
-  const whole = input.value === '' || (input.selectionStart === 0 && input.selectionEnd === input.value.length);
+  const { value, selectionStart, selectionEnd } = input;
+  const prefixLen = value.startsWith('R$ ') ? 3 : 0; // MONEY_INPUT_BRL prefix
+  const whole =
+    value === '' ||
+    (selectionStart !== null && selectionStart <= prefixLen && selectionEnd === value.length);
   if (!whole) return;
   const normalized = dotDecimalToPtBr(e.clipboardData.getData('text'));
   if (normalized === null) return;
