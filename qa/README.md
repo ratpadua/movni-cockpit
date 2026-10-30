@@ -73,3 +73,18 @@ baseline taken by `s0_login`.
 - `ui/s8_responsive.mjs` asserts the layout at 375, 768, 991 and 992 px: no horizontal page scroll, burger/drawer below
   992 px, side menu from 992 px.
 - With `DB_TARGET=local` every script uses the gitignored `.env.test` (local Docker MySQL) instead of the dev database.
+
+## Pre-release check (before EVERY production release)
+
+Run it against the **dev** database (normal `.env` + `.env.local`, no `DB_TARGET`). It exercises the production schema path and a
+small, gentle smoke test of the app against the real remote DB (Hostinger throttles many requests: do not run the full suites there).
+
+1. Stop any running server and confirm `.env` points to **dev**.
+2. `npm --prefix server run db:add-columns`, then run it **a second time**: the second run must report 0 changes (an `ATENÇÃO`
+   warning / exit code 1 means duplicate numbers block a unique index: fix the data first). Never run `db:migrate`, `db:seed` or `db:reset` here.
+3. Start the server (`npm --prefix server run start`) and run `npm --prefix qa run release-smoke` (~40 sequential requests). It checks
+   health, login, the main lists, the schema in `information_schema` (tables, `orig_date`/`orig_amount`, the two unique indexes),
+   then creates QAZ-REL data: customer, one-time contract with installments, 3 concurrent contracts (distinct numbers), received
+   installment blocks the delete (409), re-open + delete, customer delete, payment create/edit/delete. Everything QAZ-REL is removed and
+   the row counts must equal the baseline (exit code 1 otherwise).
+4. Stop the server and free port 5178.
