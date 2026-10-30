@@ -164,85 +164,87 @@ export default function Contracts() {
       </Paper>
 
       <Paper withBorder radius="md">
-        <Table striped highlightOnHover>
-          <Table.Thead>
-            <Table.Tr>
-              <Table.Th>Número</Table.Th>
-              <Table.Th>Cliente</Table.Th>
-              <Table.Th>Tipo</Table.Th>
-              <Table.Th>Status</Table.Th>
-              <Table.Th>Título</Table.Th>
-              <Table.Th ta="right">Total</Table.Th>
-              <Table.Th>Criado</Table.Th>
-              <Table.Th style={{ width: 130 }} />
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {visible.length === 0 && (
+        <Table.ScrollContainer minWidth={640}>
+          <Table striped highlightOnHover>
+            <Table.Thead>
               <Table.Tr>
-                <Table.Td colSpan={8}>
-                  <Text c="dimmed">
-                    {contracts.length === 0 ? 'Nenhum contrato ainda.' : 'Nenhum contrato encontrado.'}
-                  </Text>
-                </Table.Td>
+                <Table.Th>Número</Table.Th>
+                <Table.Th>Cliente</Table.Th>
+                <Table.Th>Tipo</Table.Th>
+                <Table.Th>Status</Table.Th>
+                <Table.Th>Título</Table.Th>
+                <Table.Th ta="right">Total</Table.Th>
+                <Table.Th>Criado</Table.Th>
+                <Table.Th style={{ width: 130 }} />
               </Table.Tr>
-            )}
-            {visible.map((c) => (
-              <Table.Tr key={c.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/contracts/${c.id}`)}>
-                <Table.Td fw={600}>{c.number ?? `#${c.id}`}</Table.Td>
-                <Table.Td>{c.customerName ?? '—'}</Table.Td>
-                <Table.Td>
-                  <Badge variant="light" color={c.type === 'invoice' ? 'blue' : 'teal'}>
-                    {typeLabel(c.type)}
-                  </Badge>
-                </Table.Td>
-                <Table.Td>
-                  {c.type === 'contract' ? (
-                    (() => {
-                      const overdue = isOverdue(c.status, c.statusChangedAt, settings);
-                      const dl = statusDeadline(c.status, c.statusChangedAt, settings);
-                      return (
-                        <Tooltip label={dl ? `Prazo: ${dl.toLocaleDateString('pt-BR')}` : ''} disabled={!dl}>
-                          <Badge variant="light" color={overdue ? 'red' : STATUS_COLORS[c.status as ContractStatus]}>
-                            {STATUS_LABELS[c.status as ContractStatus]}
-                            {overdue ? ' · atrasado' : ''}
-                          </Badge>
-                        </Tooltip>
-                      );
-                    })()
-                  ) : (
-                    <Text size="xs" c="dimmed">
-                      —
+            </Table.Thead>
+            <Table.Tbody>
+              {visible.length === 0 && (
+                <Table.Tr>
+                  <Table.Td colSpan={8}>
+                    <Text c="dimmed">
+                      {contracts.length === 0 ? 'Nenhum contrato ainda.' : 'Nenhum contrato encontrado.'}
                     </Text>
-                  )}
-                </Table.Td>
-                <Table.Td>{c.title ?? '—'}</Table.Td>
-                <Table.Td ta="right">{brl(Number(c.total))}</Table.Td>
-                <Table.Td>{new Date(c.createdAt).toLocaleDateString('pt-BR')}</Table.Td>
-                <Table.Td onClick={(e) => e.stopPropagation()}>
-                  <Group gap={2} justify="flex-end" wrap="nowrap">
-                    <ActionIcon variant="subtle" title="Abrir" onClick={() => navigate(`/contracts/${c.id}`)}>
-                      <IconExternalLink size={16} />
-                    </ActionIcon>
-                    <ActionIcon variant="subtle" title="Editar" onClick={() => openEdit(c.id)}>
-                      <IconEdit size={16} />
-                    </ActionIcon>
-                    <ActionIcon
-                      variant="subtle"
-                      color="red"
-                      title="Excluir"
-                      onClick={() => {
-                        if (confirm('Excluir este contrato?')) remove.mutate(c.id);
-                      }}
-                    >
-                      <IconTrash size={16} />
-                    </ActionIcon>
-                  </Group>
-                </Table.Td>
-              </Table.Tr>
-            ))}
-          </Table.Tbody>
-        </Table>
+                  </Table.Td>
+                </Table.Tr>
+              )}
+              {visible.map((c) => (
+                <Table.Tr key={c.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/contracts/${c.id}`)}>
+                  <Table.Td fw={600}>{c.number ?? `#${c.id}`}</Table.Td>
+                  <Table.Td>{c.customerName ?? '—'}</Table.Td>
+                  <Table.Td>
+                    <Badge variant="light" color={c.type === 'invoice' ? 'blue' : 'teal'}>
+                      {typeLabel(c.type)}
+                    </Badge>
+                  </Table.Td>
+                  <Table.Td>
+                    {c.type === 'contract' ? (
+                      (() => {
+                        const overdue = isOverdue(c.status, c.statusChangedAt, settings);
+                        const dl = statusDeadline(c.status, c.statusChangedAt, settings);
+                        return (
+                          <Tooltip label={dl ? `Prazo: ${dl.toLocaleDateString('pt-BR')}` : ''} disabled={!dl}>
+                            <Badge variant="light" color={overdue ? 'red' : STATUS_COLORS[c.status as ContractStatus]}>
+                              {STATUS_LABELS[c.status as ContractStatus]}
+                              {overdue ? ' · atrasado' : ''}
+                            </Badge>
+                          </Tooltip>
+                        );
+                      })()
+                    ) : (
+                      <Text size="xs" c="dimmed">
+                        —
+                      </Text>
+                    )}
+                  </Table.Td>
+                  <Table.Td>{c.title ?? '—'}</Table.Td>
+                  <Table.Td ta="right">{brl(Number(c.total))}</Table.Td>
+                  <Table.Td>{new Date(c.createdAt).toLocaleDateString('pt-BR')}</Table.Td>
+                  <Table.Td onClick={(e) => e.stopPropagation()}>
+                    <Group gap={2} justify="flex-end" wrap="nowrap">
+                      <ActionIcon variant="subtle" title="Abrir" onClick={() => navigate(`/contracts/${c.id}`)}>
+                        <IconExternalLink size={16} />
+                      </ActionIcon>
+                      <ActionIcon variant="subtle" title="Editar" onClick={() => openEdit(c.id)}>
+                        <IconEdit size={16} />
+                      </ActionIcon>
+                      <ActionIcon
+                        variant="subtle"
+                        color="red"
+                        title="Excluir"
+                        onClick={() => {
+                          if (confirm('Excluir este contrato?')) remove.mutate(c.id);
+                        }}
+                      >
+                        <IconTrash size={16} />
+                      </ActionIcon>
+                    </Group>
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
       </Paper>
 
       <ContractFormModal

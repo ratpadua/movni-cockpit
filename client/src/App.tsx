@@ -1,4 +1,4 @@
-import { AppShell, Group, NavLink, Text, Badge, Image, ActionIcon, Tooltip } from '@mantine/core';
+import { AppShell, Group, NavLink, Text, Badge, Image, ActionIcon, Tooltip, Burger } from '@mantine/core';
 import {
   IconDashboard,
   IconUsers,
@@ -13,6 +13,8 @@ import {
   IconSettings,
   IconLogout,
 } from '@tabler/icons-react';
+import { useEffect } from 'react';
+import { useDisclosure, useMediaQuery } from '@mantine/hooks';
 import { Routes, Route, NavLink as RouterNavLink, useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, AppSettings } from './api/client';
@@ -75,6 +77,16 @@ const DEFAULTS: AppSettings = {
 
 export default function App() {
   const location = useLocation();
+  const [navOpened, { toggle: toggleNav, close: closeNav }] = useDisclosure(false);
+  // close the mobile drawer whenever the route changes
+  useEffect(() => {
+    closeNav();
+  }, [location.pathname, closeNav]);
+  // ...and when the viewport grows to the desktop layout
+  const isDesktop = useMediaQuery('(min-width: 62em)');
+  useEffect(() => {
+    if (isDesktop) closeNav();
+  }, [isDesktop, closeNav]);
   const qc = useQueryClient();
   const logout = useMutation({
     mutationFn: () => api.post('/logout', {}),
@@ -127,18 +139,19 @@ export default function App() {
       <style>{buttonCss}</style>
     <AppShell
       header={{ height: 56 }}
-      navbar={{ width: 240, breakpoint: 'sm' }}
+      navbar={{ width: 240, breakpoint: 'md', collapsed: { mobile: !navOpened } }}
       padding="md"
-      styles={{ main: { backgroundColor: s.bgColor } }}
+      styles={{ main: { backgroundColor: s.bgColor, minWidth: 0, overflowX: 'clip' } }}
     >
       <AppShell.Header style={{ backgroundColor: s.menuColor, borderColor: 'rgba(0,0,0,0.1)' }}>
         <Group h="100%" px="md" justify="space-between">
-          <Group gap="xs">
+          <Group gap="xs" wrap="nowrap">
+            <Burger opened={navOpened} onClick={toggleNav} hiddenFrom="md" size="sm" color={menuText} aria-label={navOpened ? 'Fechar menu' : 'Abrir menu'} />
             {logo && <Image src={logo} alt="logo" h={44} w="auto" fit="contain" />}
             <Text fw={700} size="lg" c={menuText}>
               Movni Cockpit
             </Text>
-            <Badge variant="light" color="gray">
+            <Badge variant="light" color="gray" visibleFrom="sm">
               Financeiro
             </Badge>
           </Group>

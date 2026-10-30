@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Stack,
   Title,
@@ -21,6 +21,24 @@ import { logoSrc, readableText } from '../lib/theme';
 import { MONEY_INPUT_BRL } from '../lib/money';
 
 const SWATCHES = ['#ffffff', '#f8f9fa', '#1f2937', '#0b7285', '#2b8a3e', '#5f3dc4', '#c2255c', '#e8590c', '#228be6'];
+
+const HEX_RE = /^#[0-9a-f]{6}$/i;
+const COLOR_ERROR = 'Cor inválida. Use o formato #RRGGBB.';
+
+// ColorInput that keeps what was typed and shows an inline error (instead of silently reverting on blur).
+function ColorField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <ColorInput
+      label={label}
+      value={value}
+      onChange={onChange}
+      fixOnBlur={false}
+      format="hex"
+      swatches={SWATCHES}
+      error={value.trim() !== '' && !HEX_RE.test(value) ? COLOR_ERROR : undefined}
+    />
+  );
+}
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -81,6 +99,13 @@ export default function Settings() {
     onError: (e: Error) => notifications.show({ message: e.message, color: 'red' }),
   });
 
+  // preview falls back to the last valid colour while the typed text is invalid
+  const lastValidBtn = useRef('#228be6');
+  const lastValidHover = useRef('#1c7ed6');
+  if (HEX_RE.test(buttonColor)) lastValidBtn.current = buttonColor;
+  if (HEX_RE.test(buttonHoverColor)) lastValidHover.current = buttonHoverColor;
+  const previewColor = hoverPreview ? lastValidHover.current : lastValidBtn.current;
+  const colorsValid = [menuColor, accentColor, bgColor, buttonColor, buttonHoverColor].every((c) => HEX_RE.test(c));
   const saveColors = useMutation({
     mutationFn: () =>
       api.put('/settings', { menuColor, accentColor, bgColor, buttonColor, buttonHoverColor }),
@@ -125,25 +150,19 @@ export default function Settings() {
           Cores
         </Title>
         <SimpleGrid cols={{ base: 1, sm: 3 }}>
-          <ColorInput label="Cor do menu" value={menuColor} onChange={setMenuColor} format="hex" swatches={SWATCHES} />
-          <ColorInput label="Cor de destaque" value={accentColor} onChange={setAccentColor} format="hex" swatches={SWATCHES} />
-          <ColorInput label="Cor de fundo" value={bgColor} onChange={setBgColor} format="hex" swatches={SWATCHES} />
-          <ColorInput label="Cor dos botões" value={buttonColor} onChange={setButtonColor} format="hex" swatches={SWATCHES} />
-          <ColorInput
-            label="Cor dos botões (hover)"
-            value={buttonHoverColor}
-            onChange={setButtonHoverColor}
-            format="hex"
-            swatches={SWATCHES}
-          />
+          <ColorField label="Cor do menu" value={menuColor} onChange={setMenuColor} />
+          <ColorField label="Cor de destaque" value={accentColor} onChange={setAccentColor} />
+          <ColorField label="Cor de fundo" value={bgColor} onChange={setBgColor} />
+          <ColorField label="Cor dos botões" value={buttonColor} onChange={setButtonColor} />
+          <ColorField label="Cor dos botões (hover)" value={buttonHoverColor} onChange={setButtonHoverColor} />
           <div>
             <Text size="sm" fw={500} mb={2}>
               Prévia
             </Text>
             <Button
               style={{
-                backgroundColor: hoverPreview ? buttonHoverColor : buttonColor,
-                color: readableText(hoverPreview ? buttonHoverColor : buttonColor),
+                backgroundColor: previewColor,
+                color: readableText(previewColor),
               }}
               onMouseEnter={() => setHoverPreview(true)}
               onMouseLeave={() => setHoverPreview(false)}
@@ -153,7 +172,7 @@ export default function Settings() {
           </div>
         </SimpleGrid>
         <Group justify="flex-end" mt="md">
-          <Button leftSection={<IconDeviceFloppy size={16} />} loading={saveColors.isPending} onClick={() => saveColors.mutate()}>
+          <Button leftSection={<IconDeviceFloppy size={16} />} loading={saveColors.isPending} disabled={!colorsValid} onClick={() => saveColors.mutate()}>
             Salvar cores
           </Button>
         </Group>

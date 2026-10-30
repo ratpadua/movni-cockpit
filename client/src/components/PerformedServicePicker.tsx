@@ -144,26 +144,28 @@ export default function PerformedServicePicker({
               minRows={1}
             />
             {it.additionals.length > 0 && (
-              <Table mt="xs">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Adicional</Table.Th>
-                    <Table.Th>Unitário</Table.Th>
-                    <Table.Th>Qtd.</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {it.additionals.map((a, ai) => (
-                    <Table.Tr key={a.id}>
-                      <Table.Td>{a.name}</Table.Td>
-                      <Table.Td>{brl(a.unitPrice)}</Table.Td>
-                      <Table.Td>
-                        <NumberInput w={80} min={0} value={a.qty} onChange={(v) => setItemAddQty(i, ai, Number(v) || 0)} />
-                      </Table.Td>
+              <Table.ScrollContainer minWidth={640}>
+                <Table mt="xs">
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Adicional</Table.Th>
+                      <Table.Th>Unitário</Table.Th>
+                      <Table.Th>Qtd.</Table.Th>
                     </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {it.additionals.map((a, ai) => (
+                      <Table.Tr key={a.id}>
+                        <Table.Td>{a.name}</Table.Td>
+                        <Table.Td>{brl(a.unitPrice)}</Table.Td>
+                        <Table.Td>
+                          <NumberInput w={80} min={0} value={a.qty} onChange={(v) => setItemAddQty(i, ai, Number(v) || 0)} />
+                        </Table.Td>
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
             )}
             <Text size="xs" c="dimmed" mt={4}>
               Total do item: <b>{brl(performedItemTotal(value.basePrice, it))}</b>

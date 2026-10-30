@@ -339,56 +339,58 @@ export default function Templates() {
                 Nenhum modelo cadastrado.
               </Text>
             ) : (
-              <Table>
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Nome</Table.Th>
-                    <Table.Th>Arquivo</Table.Th>
-                    <Table.Th />
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {list.map((t) => (
-                    <Table.Tr key={t.id}>
-                      <Table.Td>{t.name}</Table.Td>
-                      <Table.Td>
-                        <Text size="xs" c="dimmed">
-                          {t.fileName}
-                        </Text>
-                      </Table.Td>
-                      <Table.Td>
-                        <Group gap={4} justify="flex-end" wrap="nowrap">
-                          <Anchor href={`/api/templates/${t.id}/download`}>
-                            <ActionIcon variant="subtle" title="Baixar">
-                              <IconDownload size={16} />
-                            </ActionIcon>
-                          </Anchor>
-                          <ActionIcon
-                            variant="subtle"
-                            title="Substituir (enviar novo arquivo)"
-                            onClick={() => {
-                              setReplaceTarget(t);
-                              setReplaceFile(null);
-                            }}
-                          >
-                            <IconRefresh size={16} />
-                          </ActionIcon>
-                          <ActionIcon
-                            variant="subtle"
-                            color="red"
-                            title="Excluir"
-                            onClick={() => {
-                              if (confirm(`Excluir o modelo "${t.name}"?`)) remove.mutate(t.id);
-                            }}
-                          >
-                            <IconTrash size={16} />
-                          </ActionIcon>
-                        </Group>
-                      </Table.Td>
+              <Table.ScrollContainer minWidth={640}>
+                <Table>
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Nome</Table.Th>
+                      <Table.Th>Arquivo</Table.Th>
+                      <Table.Th />
                     </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {list.map((t) => (
+                      <Table.Tr key={t.id}>
+                        <Table.Td>{t.name}</Table.Td>
+                        <Table.Td>
+                          <Text size="xs" c="dimmed">
+                            {t.fileName}
+                          </Text>
+                        </Table.Td>
+                        <Table.Td>
+                          <Group gap={4} justify="flex-end" wrap="nowrap">
+                            <Anchor href={`/api/templates/${t.id}/download`}>
+                              <ActionIcon variant="subtle" title="Baixar">
+                                <IconDownload size={16} />
+                              </ActionIcon>
+                            </Anchor>
+                            <ActionIcon
+                              variant="subtle"
+                              title="Substituir (enviar novo arquivo)"
+                              onClick={() => {
+                                setReplaceTarget(t);
+                                setReplaceFile(null);
+                              }}
+                            >
+                              <IconRefresh size={16} />
+                            </ActionIcon>
+                            <ActionIcon
+                              variant="subtle"
+                              color="red"
+                              title="Excluir"
+                              onClick={() => {
+                                if (confirm(`Excluir o modelo "${t.name}"?`)) remove.mutate(t.id);
+                              }}
+                            >
+                              <IconTrash size={16} />
+                            </ActionIcon>
+                          </Group>
+                        </Table.Td>
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
             )}
           </Paper>
         );
@@ -418,22 +420,24 @@ export default function Templates() {
                   {g.note}
                 </Text>
               )}
-              <Table mt={4} withRowBorders={false} verticalSpacing={2}>
-                <Table.Tbody>
-                  {g.fields.map(([code, meaning]) => (
-                    <Table.Tr key={code}>
-                      <Table.Td w={280}>
-                        <Code>{code}</Code>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="sm" c="dimmed">
-                          {meaning}
-                        </Text>
-                      </Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
+              <Table.ScrollContainer minWidth={640}>
+                <Table mt={4} withRowBorders={false} verticalSpacing={2}>
+                  <Table.Tbody>
+                    {g.fields.map(([code, meaning]) => (
+                      <Table.Tr key={code}>
+                        <Table.Td w={280}>
+                          <Code>{code}</Code>
+                        </Table.Td>
+                        <Table.Td>
+                          <Text size="sm" c="dimmed">
+                            {meaning}
+                          </Text>
+                        </Table.Td>
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
             </div>
           ))}
         </Stack>

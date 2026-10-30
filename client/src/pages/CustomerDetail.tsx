@@ -100,41 +100,43 @@ export default function CustomerDetail() {
             Nenhum crédito disponível.
           </Text>
         ) : (
-          <Table striped>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Descrição</Table.Th>
-                <Table.Th ta="right">Valor original</Table.Th>
-                <Table.Th ta="right">Restante</Table.Th>
-                <Table.Th />
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {active.map((c) => (
-                <Table.Tr key={c.id}>
-                  <Table.Td>{c.description}</Table.Td>
-                  <Table.Td ta="right">{brl(c.value)}</Table.Td>
-                  <Table.Td ta="right">
-                    <b>{brl(c.remaining)}</b>
-                  </Table.Td>
-                  <Table.Td ta="right">
-                    {Number(c.remaining) === Number(c.value) && (
-                      <ActionIcon
-                        variant="subtle"
-                        color="red"
-                        title="Excluir crédito"
-                        onClick={() => {
-                          if (confirm('Excluir este crédito?')) delCredit.mutate(c.id);
-                        }}
-                      >
-                        <IconTrash size={16} />
-                      </ActionIcon>
-                    )}
-                  </Table.Td>
+          <Table.ScrollContainer minWidth={640}>
+            <Table striped>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Descrição</Table.Th>
+                  <Table.Th ta="right">Valor original</Table.Th>
+                  <Table.Th ta="right">Restante</Table.Th>
+                  <Table.Th />
                 </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
+              </Table.Thead>
+              <Table.Tbody>
+                {active.map((c) => (
+                  <Table.Tr key={c.id}>
+                    <Table.Td>{c.description}</Table.Td>
+                    <Table.Td ta="right">{brl(c.value)}</Table.Td>
+                    <Table.Td ta="right">
+                      <b>{brl(c.remaining)}</b>
+                    </Table.Td>
+                    <Table.Td ta="right">
+                      {Number(c.remaining) === Number(c.value) && (
+                        <ActionIcon
+                          variant="subtle"
+                          color="red"
+                          title="Excluir crédito"
+                          onClick={() => {
+                            if (confirm('Excluir este crédito?')) delCredit.mutate(c.id);
+                          }}
+                        >
+                          <IconTrash size={16} />
+                        </ActionIcon>
+                      )}
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
         )}
 
         {showUsed && (
@@ -147,28 +149,30 @@ export default function CustomerDetail() {
                 Nenhum crédito utilizado.
               </Text>
             ) : (
-              <Table striped>
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Descrição</Table.Th>
-                    <Table.Th ta="right">Valor original</Table.Th>
-                    <Table.Th ta="right">Restante</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {used.map((c) => (
-                    <Table.Tr key={c.id}>
-                      <Table.Td>
-                        <Text size="sm" c="dimmed">
-                          {c.description}
-                        </Text>
-                      </Table.Td>
-                      <Table.Td ta="right">{brl(c.value)}</Table.Td>
-                      <Table.Td ta="right">{brl(c.remaining)}</Table.Td>
+              <Table.ScrollContainer minWidth={640}>
+                <Table striped>
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Descrição</Table.Th>
+                      <Table.Th ta="right">Valor original</Table.Th>
+                      <Table.Th ta="right">Restante</Table.Th>
                     </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {used.map((c) => (
+                      <Table.Tr key={c.id}>
+                        <Table.Td>
+                          <Text size="sm" c="dimmed">
+                            {c.description}
+                          </Text>
+                        </Table.Td>
+                        <Table.Td ta="right">{brl(c.value)}</Table.Td>
+                        <Table.Td ta="right">{brl(c.remaining)}</Table.Td>
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
             )}
           </>
         )}
@@ -185,26 +189,28 @@ export default function CustomerDetail() {
             Nenhuma cobrança pendente.
           </Text>
         ) : (
-          <Table striped>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Vencimento</Table.Th>
-                <Table.Th>Descrição</Table.Th>
-                <Table.Th>Contrato</Table.Th>
-                <Table.Th ta="right">Valor</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {charges.map((c) => (
-                <Table.Tr key={c.id}>
-                  <Table.Td>{formatBr(c.dueDate)}</Table.Td>
-                  <Table.Td>{c.description}</Table.Td>
-                  <Table.Td>{c.contractNumber ?? '—'}</Table.Td>
-                  <Table.Td ta="right">{brl(c.amount)}</Table.Td>
+          <Table.ScrollContainer minWidth={640}>
+            <Table striped>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Vencimento</Table.Th>
+                  <Table.Th>Descrição</Table.Th>
+                  <Table.Th>Contrato</Table.Th>
+                  <Table.Th ta="right">Valor</Table.Th>
                 </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
+              </Table.Thead>
+              <Table.Tbody>
+                {charges.map((c) => (
+                  <Table.Tr key={c.id}>
+                    <Table.Td>{formatBr(c.dueDate)}</Table.Td>
+                    <Table.Td>{c.description}</Table.Td>
+                    <Table.Td>{c.contractNumber ?? '—'}</Table.Td>
+                    <Table.Td ta="right">{brl(c.amount)}</Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
         )}
       </Paper>
 

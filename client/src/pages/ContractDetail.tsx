@@ -482,74 +482,76 @@ export default function ContractDetail() {
                 </Button>
               </Group>
             </Group>
-            <Table striped>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Data</Table.Th>
-                  <Table.Th>Serviço</Table.Th>
-                  <Table.Th>Descrição</Table.Th>
-                  <Table.Th ta="center">Qtd.</Table.Th>
-                  <Table.Th ta="right">Valor</Table.Th>
-                  <Table.Th>Situação</Table.Th>
-                  <Table.Th />
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {visibleItems.length === 0 && (
+            <Table.ScrollContainer minWidth={640}>
+              <Table striped>
+                <Table.Thead>
                   <Table.Tr>
-                    <Table.Td colSpan={7}>
-                      <Text c="dimmed">
-                        {c.items.length === 0
-                          ? 'Nenhum serviço realizado ainda.'
-                          : 'Nenhum serviço em aberto. Ative "Mostrar faturados" para ver os já faturados.'}
-                      </Text>
-                    </Table.Td>
+                    <Table.Th>Data</Table.Th>
+                    <Table.Th>Serviço</Table.Th>
+                    <Table.Th>Descrição</Table.Th>
+                    <Table.Th ta="center">Qtd.</Table.Th>
+                    <Table.Th ta="right">Valor</Table.Th>
+                    <Table.Th>Situação</Table.Th>
+                    <Table.Th />
                   </Table.Tr>
-                )}
-                {visibleItems.map((it) => {
-                  const inv = c.invoices.find((v) => v.id === it.invoiceId);
-                  return (
-                    <Table.Tr key={it.id}>
-                      <Table.Td>{formatBr(it.performedAt)}</Table.Td>
-                      <Table.Td>
-                        {it.serviceName} {it.version ? <Badge size="xs" variant="light">v{it.version}</Badge> : null}
-                        {it.additionals.length > 0 && (
-                          <Text size="xs" c="dimmed">
-                            {it.additionals.map((a) => `${a.name} x${a.quantity}`).join(', ')}
-                          </Text>
-                        )}
-                      </Table.Td>
-                      <Table.Td>{it.description ?? '—'}</Table.Td>
-                      <Table.Td ta="center">{it.quantity}</Table.Td>
-                      <Table.Td ta="right">{brl(Number(it.lineTotal))}</Table.Td>
-                      <Table.Td>
-                        {it.invoiceId ? (
-                          <Badge color="blue" variant="light">
-                            Faturado{inv?.reference ? ` · ${inv.reference}` : ` #${it.invoiceId}`}
-                          </Badge>
-                        ) : (
-                          <Badge color="yellow" variant="light">
-                            Em aberto
-                          </Badge>
-                        )}
-                      </Table.Td>
-                      <Table.Td>
-                        {!it.invoiceId && (
-                          <Group gap={4} wrap="nowrap" justify="flex-end">
-                            <ActionIcon variant="subtle" onClick={() => openItemEdit(it)} title="Editar" disabled={!it.serviceId}>
-                              <IconEdit size={16} />
-                            </ActionIcon>
-                            <ActionIcon color="red" variant="subtle" onClick={() => removeItem.mutate(it.id)} title="Remover">
-                              <IconTrash size={16} />
-                            </ActionIcon>
-                          </Group>
-                        )}
+                </Table.Thead>
+                <Table.Tbody>
+                  {visibleItems.length === 0 && (
+                    <Table.Tr>
+                      <Table.Td colSpan={7}>
+                        <Text c="dimmed">
+                          {c.items.length === 0
+                            ? 'Nenhum serviço realizado ainda.'
+                            : 'Nenhum serviço em aberto. Ative "Mostrar faturados" para ver os já faturados.'}
+                        </Text>
                       </Table.Td>
                     </Table.Tr>
-                  );
-                })}
-              </Table.Tbody>
-            </Table>
+                  )}
+                  {visibleItems.map((it) => {
+                    const inv = c.invoices.find((v) => v.id === it.invoiceId);
+                    return (
+                      <Table.Tr key={it.id}>
+                        <Table.Td>{formatBr(it.performedAt)}</Table.Td>
+                        <Table.Td>
+                          {it.serviceName} {it.version ? <Badge size="xs" variant="light">v{it.version}</Badge> : null}
+                          {it.additionals.length > 0 && (
+                            <Text size="xs" c="dimmed">
+                              {it.additionals.map((a) => `${a.name} x${a.quantity}`).join(', ')}
+                            </Text>
+                          )}
+                        </Table.Td>
+                        <Table.Td>{it.description ?? '—'}</Table.Td>
+                        <Table.Td ta="center">{it.quantity}</Table.Td>
+                        <Table.Td ta="right">{brl(Number(it.lineTotal))}</Table.Td>
+                        <Table.Td>
+                          {it.invoiceId ? (
+                            <Badge color="blue" variant="light">
+                              Faturado{inv?.reference ? ` · ${inv.reference}` : ` #${it.invoiceId}`}
+                            </Badge>
+                          ) : (
+                            <Badge color="yellow" variant="light">
+                              Em aberto
+                            </Badge>
+                          )}
+                        </Table.Td>
+                        <Table.Td>
+                          {!it.invoiceId && (
+                            <Group gap={4} wrap="nowrap" justify="flex-end">
+                              <ActionIcon variant="subtle" onClick={() => openItemEdit(it)} title="Editar" disabled={!it.serviceId}>
+                                <IconEdit size={16} />
+                              </ActionIcon>
+                              <ActionIcon color="red" variant="subtle" onClick={() => removeItem.mutate(it.id)} title="Remover">
+                                <IconTrash size={16} />
+                              </ActionIcon>
+                            </Group>
+                          )}
+                        </Table.Td>
+                      </Table.Tr>
+                    );
+                  })}
+                </Table.Tbody>
+              </Table>
+            </Table.ScrollContainer>
           </Paper>
 
           {/* invoices */}
@@ -922,32 +924,34 @@ function OneTimeView({
         <Title order={4} mb="sm">
           Itens do contrato
         </Title>
-        <Table striped>
-          <Table.Thead>
-            <Table.Tr>
-              <Table.Th>Serviço</Table.Th>
-              <Table.Th>Adicionais</Table.Th>
-              <Table.Th ta="center">Desc.</Table.Th>
-              <Table.Th ta="right">Valor</Table.Th>
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {c.items.map((it) => (
-              <Table.Tr key={it.id}>
-                <Table.Td>
-                  {it.serviceName} {it.version ? <Badge size="xs" variant="light">v{it.version}</Badge> : null}
-                </Table.Td>
-                <Table.Td>
-                  {it.additionals.length === 0
-                    ? '—'
-                    : it.additionals.map((a) => `${a.name} x${a.quantity}${Number(a.discountPercent) ? ` (-${Number(a.discountPercent)}%)` : ''}`).join(', ')}
-                </Table.Td>
-                <Table.Td ta="center">{Number(it.discountPercent) ? `${Number(it.discountPercent)}%` : '—'}</Table.Td>
-                <Table.Td ta="right">{brl(Number(it.lineTotal))}</Table.Td>
+        <Table.ScrollContainer minWidth={640}>
+          <Table striped>
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Serviço</Table.Th>
+                <Table.Th>Adicionais</Table.Th>
+                <Table.Th ta="center">Desc.</Table.Th>
+                <Table.Th ta="right">Valor</Table.Th>
               </Table.Tr>
-            ))}
-          </Table.Tbody>
-        </Table>
+            </Table.Thead>
+            <Table.Tbody>
+              {c.items.map((it) => (
+                <Table.Tr key={it.id}>
+                  <Table.Td>
+                    {it.serviceName} {it.version ? <Badge size="xs" variant="light">v{it.version}</Badge> : null}
+                  </Table.Td>
+                  <Table.Td>
+                    {it.additionals.length === 0
+                      ? '—'
+                      : it.additionals.map((a) => `${a.name} x${a.quantity}${Number(a.discountPercent) ? ` (-${Number(a.discountPercent)}%)` : ''}`).join(', ')}
+                  </Table.Td>
+                  <Table.Td ta="center">{Number(it.discountPercent) ? `${Number(it.discountPercent)}%` : '—'}</Table.Td>
+                  <Table.Td ta="right">{brl(Number(it.lineTotal))}</Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
         {c.modifiers.length > 0 && (
           <>
             <Divider my="sm" label="Modificadores" />
@@ -976,72 +980,74 @@ function OneTimeView({
             Pagamento extra
           </Button>
         </Group>
-        <Table striped>
-          <Table.Thead>
-            <Table.Tr>
-              <Table.Th>Descrição</Table.Th>
-              <Table.Th>Vencimento</Table.Th>
-              <Table.Th ta="right">Valor</Table.Th>
-              <Table.Th>Situação</Table.Th>
-              <Table.Th ta="right" />
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {c.payments.length === 0 && (
+        <Table.ScrollContainer minWidth={640}>
+          <Table striped>
+            <Table.Thead>
               <Table.Tr>
-                <Table.Td colSpan={5}>
-                  <Text c="dimmed">Nenhum pagamento.</Text>
-                </Table.Td>
+                <Table.Th>Descrição</Table.Th>
+                <Table.Th>Vencimento</Table.Th>
+                <Table.Th ta="right">Valor</Table.Th>
+                <Table.Th>Situação</Table.Th>
+                <Table.Th ta="right" />
               </Table.Tr>
-            )}
-            {c.payments.map((p) => (
-              <Table.Tr key={p.id}>
-                <Table.Td>
-                  {p.installmentNumber ? `Parcela ${p.installmentNumber}/${p.installmentCount}` : p.description}
-                </Table.Td>
-                <Table.Td>{formatBr(p.dueDate)}</Table.Td>
-                <Table.Td ta="right">{brl(Number(p.amount))}</Table.Td>
-                <Table.Td>
-                  <Group gap={4}>
-                    <Badge color={p.flow === 'in' ? 'green' : 'red'} variant="dot">
-                      {p.flow === 'in' ? 'Entrada' : 'Saída'}
-                    </Badge>
-                    <Badge color={paymentSituation(p).color} variant="light">
-                      {paymentSituation(p).label}
-                    </Badge>
-                  </Group>
-                </Table.Td>
-                <Table.Td>
-                  <Group gap={4} justify="flex-end" wrap="nowrap">
-                    {p.flow === 'in' && p.receiptStatus === 'open' && (
-                      <Button size="compact-xs" variant="light" leftSection={<IconCheck size={14} />} onClick={() => onMarkReceived(p)}>
-                        Marcar recebido
-                      </Button>
-                    )}
-                    {p.flow === 'in' && p.receiptStatus !== 'open' && (
-                      <>
-                        <Button size="compact-xs" variant="light" leftSection={<IconFileText size={14} />} onClick={() => onGenerateReceipt(p.id, 'docx')}>
-                          Baixar
+            </Table.Thead>
+            <Table.Tbody>
+              {c.payments.length === 0 && (
+                <Table.Tr>
+                  <Table.Td colSpan={5}>
+                    <Text c="dimmed">Nenhum pagamento.</Text>
+                  </Table.Td>
+                </Table.Tr>
+              )}
+              {c.payments.map((p) => (
+                <Table.Tr key={p.id}>
+                  <Table.Td>
+                    {p.installmentNumber ? `Parcela ${p.installmentNumber}/${p.installmentCount}` : p.description}
+                  </Table.Td>
+                  <Table.Td>{formatBr(p.dueDate)}</Table.Td>
+                  <Table.Td ta="right">{brl(Number(p.amount))}</Table.Td>
+                  <Table.Td>
+                    <Group gap={4}>
+                      <Badge color={p.flow === 'in' ? 'green' : 'red'} variant="dot">
+                        {p.flow === 'in' ? 'Entrada' : 'Saída'}
+                      </Badge>
+                      <Badge color={paymentSituation(p).color} variant="light">
+                        {paymentSituation(p).label}
+                      </Badge>
+                    </Group>
+                  </Table.Td>
+                  <Table.Td>
+                    <Group gap={4} justify="flex-end" wrap="nowrap">
+                      {p.flow === 'in' && p.receiptStatus === 'open' && (
+                        <Button size="compact-xs" variant="light" leftSection={<IconCheck size={14} />} onClick={() => onMarkReceived(p)}>
+                          Marcar recebido
                         </Button>
-                        <Button size="compact-xs" variant="light" onClick={() => onGenerateReceipt(p.id, 'pdf')}>
-                          PDF
-                        </Button>
-                      </>
-                    )}
-                    <ActionIcon size="sm" variant="subtle" title="Editar pagamento" onClick={() => onEditPayment(p)}>
-                      <IconEdit size={14} />
-                    </ActionIcon>
-                    {!isInstallment(p) && (
-                      <ActionIcon size="sm" variant="subtle" color="red" title="Remover pagamento" onClick={() => onRemovePayment(p.id)}>
-                        <IconTrash size={14} />
+                      )}
+                      {p.flow === 'in' && p.receiptStatus !== 'open' && (
+                        <>
+                          <Button size="compact-xs" variant="light" leftSection={<IconFileText size={14} />} onClick={() => onGenerateReceipt(p.id, 'docx')}>
+                            Baixar
+                          </Button>
+                          <Button size="compact-xs" variant="light" onClick={() => onGenerateReceipt(p.id, 'pdf')}>
+                            PDF
+                          </Button>
+                        </>
+                      )}
+                      <ActionIcon size="sm" variant="subtle" title="Editar pagamento" onClick={() => onEditPayment(p)}>
+                        <IconEdit size={14} />
                       </ActionIcon>
-                    )}
-                  </Group>
-                </Table.Td>
-              </Table.Tr>
-            ))}
-          </Table.Tbody>
-        </Table>
+                      {!isInstallment(p) && (
+                        <ActionIcon size="sm" variant="subtle" color="red" title="Remover pagamento" onClick={() => onRemovePayment(p.id)}>
+                          <IconTrash size={14} />
+                        </ActionIcon>
+                      )}
+                    </Group>
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
       </Paper>
 
       <Paper withBorder p="md" radius="md">
