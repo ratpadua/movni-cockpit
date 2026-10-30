@@ -89,6 +89,10 @@ npm start                  # build the client, then serve everything on :5178
   `server/src/db/add-columns.ts` (`npm --prefix server run db:add-columns`). **Whenever the schema
   gains a table/column/foreign key, also add it to that script** (it checks `information_schema`
   first, so re-running is safe). Run it on production only when the owner asks.
+- `add-columns.ts` also creates the numbering **unique indexes** (`contracts_number_uq`,
+  `invoices_ref_number_uq`). If production already has duplicate numbers it skips them with a warning
+  (`ATENÇÃO`, non-zero exit); until the duplicates are fixed and the script is re-run there, the
+  duplicate-number retry protection is inactive on that database.
 
 ---
 
@@ -167,7 +171,12 @@ npm start                  # build the client, then serve everything on :5178
 - **Contract types:** *one-time contract* (`contract`) and *recurring contract* (`invoice`, invoiced
   periodically).
 - **Numbering:** one-time `YY/XXX` (e.g. `26/001`); recurring `F###` (e.g. `F001`). Each fatura has a
-  sequential reference `NNN-YY` (e.g. `001-26`), exposed as `{invoice_number}`.
+  sequential reference `NNN-YY` (e.g. `001-26`), exposed as `{invoice_number}`. Both are one global
+  sequence (not per customer/contract) allocated as max+1 by a non-locking read inside the creating
+  transaction. Each server serialises allocation with an in-process mutex (`contract-number` for `YY/XXX`
+  and `F###`, `invoice-ref` for fatura references); across machines the unique indexes
+  `contracts_number_uq` / `invoices_ref_number_uq` arbitrate, and on a duplicate or deadlock the
+  transaction is retried (`withNumberRetry`) up to 8 times with a growing, jittered delay.
 - **Services** are versioned (price + additionals are snapshotted into contract items). A one-time
   contract has one service; its title is the service name.
 - **Installments:** each at least the configurable minimum (`settings.min_installment_value`, R$ 150 by
@@ -181,8 +190,24 @@ npm start                  # build the client, then serve everything on :5178
 - **Recurring contract total = sum of its faturas, net of credit** (not the sum of performed items).
 - **Faturas can be edited** (reference, services, discount, modifiers, credit, installments). Removed
   services return to "open"; an applied credit is reinstated; deleting a fatura also reinstates the
-  credit. Editing is blocked once any installment was received. A fatura that comes out **negative**
-  is clamped to 0 and the surplus becomes a **customer credit** (with a description the user types).
+  credit. Editing **and deleting** a fatura are blocked (409) once any installment was received
+  (cancelling it then needs the not-yet-implemented rescisão, issue #14). A fatura that comes out **negative**
+  is clamped to 0 and the surplus becomes a **customer credit** (with a description the user types);
+  that surplus credit is **not** reversed when the fatura/contract is later deleted or edited.
+- **Editing a one-time contract:** once any payment of the contract was received/paid, changing items,
+  modifiers, installments or due dates (and the contract type) is refused with 409; header data
+  (comments, execution, templates, customer, title) stays editable. Before any receipt, installments are
+  re-split on the **net total after the applied credit** (`total − creditApplied`, still capped by
+  `maxInstallmentsFor`); if the new total is below the credit applied it answers 400. Extra payments
+  (no installment number) are never regenerated.
+- **Deleting a contract** is blocked (409) when any of its payments, direct or via faturas, was already
+  received/paid. Otherwise the customer credit it consumed (its own and its faturas') is **reinstated**,
+  its generated document files are removed from disk, and payments/faturas/items go with it. Rescinding a
+  contract that already has received payments is not implemented (issue #14).
+- **Deleting a customer** is blocked (409) while the customer has contracts, payments or credits; the
+  message lists the counts.
+- Multi-step writes (create/edit/delete contract, create/edit/delete fatura, bank import) run in one DB
+  transaction.
 - **Modifiers** (free-value lines, may be negative, with a discount %) exist on contracts and faturas.
 
 ### Customer credits

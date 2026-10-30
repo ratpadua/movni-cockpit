@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { eq, ne, and, isNull, desc, inArray, like } from 'drizzle-orm';
+import { eq, ne, and, or, isNull, isNotNull, desc, inArray, like } from 'drizzle-orm';
 import { db, schema } from '../db/client.js';
 import {
   generateContract,
@@ -33,6 +33,66 @@ const brDate = (s?: string | null) => {
 
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
+
+// A DB executor: the tx handed out by db.transaction() (or the shared db, cast).
+// Helpers that take part in a transaction accept one (default: the shared db).
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type Exec = Tx;
+const dbExec = (): Exec => db as unknown as Exec;
+
+// MySQL duplicate-key error (unique index hit), possibly wrapped by the driver/ORM.
+function isDupEntry(e: any): boolean {
+  return e?.code === 'ER_DUP_ENTRY' || e?.errno === 1062 || e?.cause?.code === 'ER_DUP_ENTRY' || e?.cause?.errno === 1062;
+}
+
+// Duplicate key (another machine took the number) or deadlock: safe to retry the whole transaction.
+const isRetryable = (e: any) =>
+  isDupEntry(e) || e?.code === 'ER_LOCK_DEADLOCK' || e?.errno === 1213 || e?.cause?.code === 'ER_LOCK_DEADLOCK' || e?.cause?.errno === 1213;
+
+// Run fn (which allocates a number and writes inside one transaction). When two
+// machines pick the same number the unique index rejects the second one (or MySQL
+// reports a deadlock); we wait a jittered, growing delay (20-120ms base, doubling
+// per attempt), recompute the next number and try again (up to 8 attempts).
+async function withNumberRetry<T>(fn: () => Promise<T>): Promise<T> {
+  const MAX_ATTEMPTS = 8;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (!isRetryable(e) || attempt >= MAX_ATTEMPTS) throw e;
+      const delay = (20 + Math.random() * 100) * Math.min(2 ** (attempt - 1), 8);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
+// Tiny in-process async mutex per key: this server never races itself when it
+// allocates numbers (the DB unique index + retry still arbitrate between machines).
+const mutexTails = new Map<string, Promise<void>>();
+async function withMutex<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = mutexTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const mine = new Promise<void>((r) => (release = r));
+  const tail = prev.then(() => mine);
+  mutexTails.set(key, tail);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (mutexTails.get(key) === tail) mutexTails.delete(key);
+  }
+}
+
+// Thrown inside a transaction to abort it and answer with a given HTTP status.
+class HttpError extends Error {
+  constructor(
+    public status: number,
+    message: string
+  ) {
+    super(message);
+  }
+}
 
 // A document record as the client sees it: never the absolute path on this machine.
 function publicDocument<T extends { filePath?: unknown }>(d: T): Omit<T, 'filePath'> {
@@ -155,8 +215,9 @@ function documentPath(fileName: string): string | null {
 
 // Max installments so no installment is below the configured minimum value
 // (Configurações → Parcelamento, R$150 by default); at least 1.
-async function maxInstallmentsFor(total: number): Promise<number> {
-  return Math.max(1, Math.floor(total / (await getMinInstallmentValue())));
+// Pass min (read BEFORE opening a transaction) to avoid a second pool connection inside it.
+async function maxInstallmentsFor(total: number, min?: number): Promise<number> {
+  return Math.max(1, Math.floor(total / (min ?? (await getMinInstallmentValue()))));
 }
 
 // Split a total into `count` equal installments (cents-exact; remainder on last).
@@ -170,15 +231,18 @@ function splitAmount(total: number, count: number): number[] {
 }
 
 // Create one payment per installment (linked to the contract and/or invoice).
-async function createInstallmentPayments(opts: {
-  contractId: number | null;
-  invoiceId?: number | null;
-  customerId?: number | null;
-  label: string;
-  total: number;
-  count: number;
-  dueDates?: (string | null)[];
-}) {
+async function createInstallmentPayments(
+  opts: {
+    contractId: number | null;
+    invoiceId?: number | null;
+    customerId?: number | null;
+    label: string;
+    total: number;
+    count: number;
+    dueDates?: (string | null)[];
+  },
+  ex: Exec = dbExec()
+) {
   const count = Math.max(1, opts.count);
   const amounts = splitAmount(opts.total, count);
   const rows = amounts.map((amt, i) => ({
@@ -195,14 +259,14 @@ async function createInstallmentPayments(opts: {
     installmentCount: count,
     dueDate: opts.dueDates?.[i] ?? null,
   }));
-  if (rows.length > 0) await db.insert(schema.payments).values(rows);
+  if (rows.length > 0) await ex.insert(schema.payments).values(rows);
 }
 
 // Next contract number in the YY/XXX format, sequence resetting each year.
-async function nextContractNumber(type: 'contract' | 'invoice'): Promise<string> {
+async function nextContractNumber(type: 'contract' | 'invoice', ex: Exec = dbExec()): Promise<string> {
   // Recurring contracts (invoices) use their own ever-increasing sequence: F001, F002, ...
   if (type === 'invoice') {
-    const rows = await db
+    const rows = await ex
       .select({ number: schema.contracts.number })
       .from(schema.contracts)
       .where(like(schema.contracts.number, 'F%'));
@@ -217,7 +281,7 @@ async function nextContractNumber(type: 'contract' | 'invoice'): Promise<string>
   // One-time contracts: YY/XXX, reset per year.
   const yy = String(new Date().getFullYear() % 100).padStart(2, '0');
   const prefix = `${yy}/`;
-  const rows = await db
+  const rows = await ex
     .select({ number: schema.contracts.number })
     .from(schema.contracts)
     .where(like(schema.contracts.number, `${prefix}%`));
@@ -230,10 +294,10 @@ async function nextContractNumber(type: 'contract' | 'invoice'): Promise<string>
 }
 
 // Sequential invoice reference number, reset per year: seq-YY (e.g. 001-26, 002-26).
-async function nextInvoiceRefNumber(): Promise<string> {
+async function nextInvoiceRefNumber(ex: Exec = dbExec()): Promise<string> {
   const yy = String(new Date().getFullYear() % 100).padStart(2, '0');
   const suffix = `-${yy}`;
-  const rows = await db
+  const rows = await ex
     .select({ refNumber: schema.invoices.refNumber })
     .from(schema.invoices)
     .where(like(schema.invoices.refNumber, `%${suffix}`));
@@ -243,6 +307,33 @@ async function nextInvoiceRefNumber(): Promise<string> {
     if (Number.isFinite(seq) && seq > max) max = seq;
   }
   return `${String(max + 1).padStart(3, '0')}${suffix}`;
+}
+
+// Number of payments already received (entrada: received/sent) or paid (saída: done)
+// among the payments linked to a contract and/or to the given invoices.
+// It is a LOCKING read (FOR UPDATE) meant to run inside a transaction: a concurrent
+// receipt either committed first (and is seen here) or waits for this transaction.
+async function countSettledPayments(
+  opts: { contractId?: number; invoiceIds?: number[] },
+  ex: Exec = dbExec()
+): Promise<number> {
+  const conds: any[] = [];
+  if (opts.contractId !== undefined) conds.push(eq(schema.payments.contractId, opts.contractId));
+  if (opts.invoiceIds && opts.invoiceIds.length > 0) conds.push(inArray(schema.payments.invoiceId, opts.invoiceIds));
+  if (conds.length === 0) return 0;
+  const rows = await ex
+    .select({
+      id: schema.payments.id,
+      flow: schema.payments.flow,
+      status: schema.payments.status,
+      receiptStatus: schema.payments.receiptStatus,
+    })
+    .from(schema.payments)
+    .where(conds.length === 1 ? conds[0] : or(...conds))
+    .for('update');
+  return rows.filter((p) =>
+    p.flow === 'out' ? p.status === 'done' : p.receiptStatus === 'received' || p.receiptStatus === 'sent'
+  ).length;
 }
 
 interface AdditionalInput {
@@ -343,9 +434,10 @@ async function buildItems(items: ItemInput[]): Promise<{ rows: SnapshotRow[]; to
 async function persistOneItem(
   contractId: number,
   row: SnapshotRow,
-  extra?: { description?: string | null; performedAt?: string | null; invoiceId?: number | null }
+  extra?: { description?: string | null; performedAt?: string | null; invoiceId?: number | null },
+  ex: Exec = dbExec()
 ): Promise<number> {
-  const itemRes: any = await db
+  const itemRes: any = await ex
     .insert(schema.contractItems)
     .values({
       contractId,
@@ -362,7 +454,7 @@ async function persistOneItem(
     .$returningId();
   const itemId = itemRes[0].id;
   if (row.additionals.length > 0) {
-    await db.insert(schema.contractItemAdditionals).values(
+    await ex.insert(schema.contractItemAdditionals).values(
       row.additionals.map((a) => ({
         contractItemId: itemId,
         additionalId: a.additionalId,
@@ -379,8 +471,8 @@ async function persistOneItem(
 
 // Contract total = sum of item line totals (already per-item discounted)
 // plus the contract-level custom modifiers (which may be negative). Never below 0.
-async function recomputeContractTotal(contractId: number) {
-  const [contract] = await db
+async function recomputeContractTotal(contractId: number, ex: Exec = dbExec()) {
+  const [contract] = await ex
     .select({ type: schema.contracts.type })
     .from(schema.contracts)
     .where(eq(schema.contracts.id, contractId));
@@ -389,18 +481,18 @@ async function recomputeContractTotal(contractId: number) {
   if (contract?.type === 'invoice') {
     // Recurring contract total = the amount actually billed: the sum of its
     // invoices, each net of any credit applied.
-    const invs = await db
+    const invs = await ex
       .select({ total: schema.invoices.total, creditApplied: schema.invoices.creditApplied })
       .from(schema.invoices)
       .where(eq(schema.invoices.contractId, contractId));
     total = Math.max(0, round2(invs.reduce((s, i) => s + (Number(i.total) - Number(i.creditApplied ?? 0)), 0)));
   } else {
     // One-time contract total = its items (already discounted) + its modifiers.
-    const rows = await db
+    const rows = await ex
       .select({ lineTotal: schema.contractItems.lineTotal })
       .from(schema.contractItems)
       .where(eq(schema.contractItems.contractId, contractId));
-    const mods = await db
+    const mods = await ex
       .select({ price: schema.contractModifiers.price, discountPercent: schema.contractModifiers.discountPercent })
       .from(schema.contractModifiers)
       .where(eq(schema.contractModifiers.contractId, contractId));
@@ -409,7 +501,7 @@ async function recomputeContractTotal(contractId: number) {
     total = Math.max(0, round2(itemsSum + modsSum));
   }
 
-  await db.update(schema.contracts).set({ total: String(total) }).where(eq(schema.contracts.id, contractId));
+  await ex.update(schema.contracts).set({ total: String(total) }).where(eq(schema.contracts.id, contractId));
   return total;
 }
 
@@ -445,8 +537,8 @@ function modifiersDiscountAmount(mods: any[]): number {
 }
 
 // Replace a contract's custom modifiers. items: [{name, price}]
-async function persistContractModifiers(contractId: number, modifiers: any[] | undefined) {
-  await db.delete(schema.contractModifiers).where(eq(schema.contractModifiers.contractId, contractId));
+async function persistContractModifiers(contractId: number, modifiers: any[] | undefined, ex: Exec = dbExec()) {
+  await ex.delete(schema.contractModifiers).where(eq(schema.contractModifiers.contractId, contractId));
   const rows = (modifiers ?? [])
     .filter((m) => m && m.name)
     .map((m) => ({
@@ -455,7 +547,7 @@ async function persistContractModifiers(contractId: number, modifiers: any[] | u
       price: String(Number(m.price) || 0),
       discountPercent: String(Number(m.discountPercent) || 0),
     }));
-  if (rows.length > 0) await db.insert(schema.contractModifiers).values(rows);
+  if (rows.length > 0) await ex.insert(schema.contractModifiers).values(rows);
 }
 
 // Deduct up to `total` from a customer's credit; returns the amount applied and
@@ -464,18 +556,19 @@ async function applyCredit(opts: {
   creditId: number | null | undefined;
   customerId: number | null;
   total: number;
-}): Promise<number> {
+}, ex: Exec = dbExec()): Promise<number> {
   const { creditId, customerId, total } = opts;
   if (!creditId || !customerId || total <= 0) return 0;
-  const [credit] = await db
+  const [credit] = await ex
     .select()
     .from(schema.customerCredits)
-    .where(eq(schema.customerCredits.id, Number(creditId)));
+    .where(eq(schema.customerCredits.id, Number(creditId)))
+    .for('update');
   if (!credit || credit.customerId !== customerId) return 0;
   const remaining = Number(credit.remaining);
   if (remaining <= 0) return 0;
   const applied = round2(Math.min(remaining, total));
-  await db
+  await ex
     .update(schema.customerCredits)
     .set({ remaining: String(round2(remaining - applied)) })
     .where(eq(schema.customerCredits.id, credit.id));
@@ -494,15 +587,19 @@ async function creditDescription(creditId: number | null | undefined): Promise<s
 
 // Give back a credit that an invoice had applied (on invoice delete/edit): the
 // applied amount returns to the credit's remaining balance.
-async function reinstateInvoiceCredit(inv: { creditId: number | null; creditApplied: string | null }) {
+async function reinstateInvoiceCredit(
+  inv: { creditId: number | null; creditApplied: string | null },
+  ex: Exec = dbExec()
+) {
   const applied = Number(inv.creditApplied ?? 0);
   if (!inv.creditId || applied <= 0) return;
-  const [credit] = await db
+  const [credit] = await ex
     .select()
     .from(schema.customerCredits)
-    .where(eq(schema.customerCredits.id, inv.creditId));
+    .where(eq(schema.customerCredits.id, inv.creditId))
+    .for('update');
   if (!credit) return;
-  await db
+  await ex
     .update(schema.customerCredits)
     .set({ remaining: String(round2(Number(credit.remaining) + applied)) })
     .where(eq(schema.customerCredits.id, credit.id));
@@ -532,7 +629,9 @@ async function composeInvoice(
   billable: (typeof schema.contractItems.$inferSelect)[],
   // Only create-time banks a negative fatura's surplus as a new credit; edits do
   // not, because the originally banked credit can't be reliably reversed here.
-  bankSurplus = true
+  bankSurplus = true,
+  ex: Exec = dbExec(),
+  minInstallment?: number
 ) {
   const { reference, comments, discountPercent, installments, dueDates, modifiers, creditId, creditDescription } = body;
 
@@ -544,11 +643,11 @@ async function composeInvoice(
   // clamped to 0 and the surplus becomes a customer credit (below).
   const rawTotal = round2(withDisc(subtotal, discountPercent) + modsSum);
   const total = Math.max(0, rawTotal);
-  const creditApplied = await applyCredit({ creditId, customerId, total });
+  const creditApplied = await applyCredit({ creditId, customerId, total }, ex);
   const base = Math.max(0, round2(total - creditApplied));
-  const count = base > 0 ? Math.min(Math.max(1, Number(installments) || 1), await maxInstallmentsFor(base)) : 0;
+  const count = base > 0 ? Math.min(Math.max(1, Number(installments) || 1), await maxInstallmentsFor(base, minInstallment)) : 0;
 
-  await db
+  await ex
     .update(schema.invoices)
     .set({
       reference: reference ?? null,
@@ -569,10 +668,10 @@ async function composeInvoice(
       price: String(Number(m.price) || 0),
       discountPercent: String(Number(m.discountPercent) || 0),
     }));
-  if (modRows.length > 0) await db.insert(schema.invoiceModifiers).values(modRows);
+  if (modRows.length > 0) await ex.insert(schema.invoiceModifiers).values(modRows);
 
   if (billable.length > 0) {
-    await db
+    await ex
       .update(schema.contractItems)
       .set({ invoiceId })
       .where(inArray(schema.contractItems.id, billable.map((it) => it.id)));
@@ -587,7 +686,7 @@ async function composeInvoice(
       total: base,
       count,
       dueDates,
-    });
+    }, ex);
   }
 
   if (bankSurplus && rawTotal < 0 && customerId) {
@@ -595,7 +694,7 @@ async function composeInvoice(
     const desc =
       (typeof creditDescription === 'string' && creditDescription.trim()) ||
       `Crédito da fatura${reference ? ` ${reference}` : ''}`;
-    await db.insert(schema.customerCredits).values({
+    await ex.insert(schema.customerCredits).values({
       customerId,
       description: desc,
       value: String(surplus),
@@ -680,8 +779,8 @@ async function loadFullContract(id: number) {
 }
 
 // Persist several items (one-time contract scope).
-async function persistItems(contractId: number, built: SnapshotRow[]) {
-  for (const r of built) await persistOneItem(contractId, r);
+async function persistItems(contractId: number, built: SnapshotRow[], ex: Exec = dbExec()) {
+  for (const r of built) await persistOneItem(contractId, r, undefined, ex);
 }
 
 export function registerContractRoutes(app: FastifyInstance) {
@@ -789,8 +888,16 @@ export function registerContractRoutes(app: FastifyInstance) {
     } = req.body ?? {};
     const isOneTime = (type ?? 'contract') !== 'invoice';
     const { rows, total: itemsSum } = await buildItems(isOneTime ? items ?? [] : []);
-    const number = await nextContractNumber(isOneTime ? 'contract' : 'invoice');
-
+    if (isOneTime && Array.isArray(items) && rows.length < items.length) {
+      return badRequest(reply, 'Serviço não encontrado.');
+    }
+    if (isOneTime && creditId) {
+      const [cr] = await db
+        .select({ customerId: schema.customerCredits.customerId })
+        .from(schema.customerCredits)
+        .where(eq(schema.customerCredits.id, Number(creditId)));
+      if (!cr || cr.customerId !== (customerId ?? null)) return badRequest(reply, 'Crédito não encontrado.');
+    }
     // A one-time contract's title is the (single) service name.
     const derivedTitle = isOneTime ? rows[0]?.serviceName ?? title ?? null : title ?? null;
 
@@ -802,72 +909,90 @@ export function registerContractRoutes(app: FastifyInstance) {
         )
       : 0;
     const baseFinal = Math.max(0, itemsSum + modsSum);
+    const minInst = await getMinInstallmentValue(); // read before the transaction
     const count = isOneTime
-      ? Math.min(Math.max(1, Number(installments) || 1), await maxInstallmentsFor(baseFinal))
+      ? Math.min(Math.max(1, Number(installments) || 1), await maxInstallmentsFor(baseFinal, minInst))
       : 1;
 
-    const res: any = await db
-      .insert(schema.contracts)
-      .values({
-        number,
-        customerId: customerId ?? null,
-        type: type ?? 'contract',
-        title: derivedTitle,
-        comments: comments ?? null,
-        installments: count,
-        templateId: isOneTime ? templateId ?? null : null,
-        invoiceTemplateId: isOneTime ? null : invoiceTemplateId ?? null,
-        receiptTemplateId: receiptTemplateId ?? null,
-        executionDate: executionDate || null,
-        executionTime: executionTime ?? null,
-        executionAddress: executionAddress ?? null,
-        duration: isOneTime ? duration ?? null : null,
-        quantity: isOneTime ? (quantity != null && quantity !== '' ? Number(quantity) : null) : null,
-        total: '0',
+    // Everything is written in ONE transaction (contract, items, modifiers, credit
+    // use, installments). The number is allocated inside it; if another machine took
+    // the same number first, the unique index rejects it and we retry with the next.
+    const contractId = await withMutex('contract-number', () => withNumberRetry(() =>
+      db.transaction(async (tx) => {
+        const number = await nextContractNumber(isOneTime ? 'contract' : 'invoice', tx);
+        const res: any = await tx
+          .insert(schema.contracts)
+          .values({
+            number,
+            customerId: customerId ?? null,
+            type: type ?? 'contract',
+            title: derivedTitle,
+            comments: comments ?? null,
+            installments: count,
+            templateId: isOneTime ? templateId ?? null : null,
+            invoiceTemplateId: isOneTime ? null : invoiceTemplateId ?? null,
+            receiptTemplateId: receiptTemplateId ?? null,
+            executionDate: executionDate || null,
+            executionTime: executionTime ?? null,
+            executionAddress: executionAddress ?? null,
+            duration: isOneTime ? duration ?? null : null,
+            quantity: isOneTime ? (quantity != null && quantity !== '' ? Number(quantity) : null) : null,
+            total: '0',
+          })
+          .$returningId();
+        const newId: number = res[0].id;
+
+        await persistItems(newId, rows, tx);
+        if (isOneTime) await persistContractModifiers(newId, modifiers, tx);
+        const total = await recomputeContractTotal(newId, tx);
+
+        // Apply a prepaid credit: it reduces the amount split into installments.
+        const creditApplied = isOneTime
+          ? await applyCredit({ creditId, customerId: customerId ?? null, total }, tx)
+          : 0;
+        const base = Math.max(0, round2(total - creditApplied));
+        const finalCount = base > 0 ? Math.min(Math.max(1, Number(installments) || 1), await maxInstallmentsFor(base, minInst)) : 0;
+
+        if (isOneTime) {
+          await tx
+            .update(schema.contracts)
+            .set({
+              installments: finalCount,
+              ...(creditApplied > 0 ? { creditId: Number(creditId), creditApplied: String(creditApplied) } : {}),
+            })
+            .where(eq(schema.contracts.id, newId));
+          // Generate installment payments only for the amount still owed after credit.
+          if (base > 0) {
+            await createInstallmentPayments(
+              {
+                contractId: newId,
+                customerId: customerId ?? null,
+                label: '',
+                total: base,
+                count: finalCount,
+                dueDates,
+              },
+              tx
+            );
+          }
+        }
+        return newId;
       })
-      .$returningId();
-    const contractId = res[0].id;
-
-    await persistItems(contractId, rows);
-    if (isOneTime) await persistContractModifiers(contractId, modifiers);
-    const total = await recomputeContractTotal(contractId);
-
-    // Apply a prepaid credit: it reduces the amount split into installments.
-    const creditApplied = isOneTime ? await applyCredit({ creditId, customerId: customerId ?? null, total }) : 0;
-    const base = Math.max(0, round2(total - creditApplied));
-    const finalCount = base > 0 ? Math.min(Math.max(1, Number(installments) || 1), await maxInstallmentsFor(base)) : 0;
-
-    if (isOneTime) {
-      await db
-        .update(schema.contracts)
-        .set({
-          installments: finalCount,
-          ...(creditApplied > 0 ? { creditId: Number(creditId), creditApplied: String(creditApplied) } : {}),
-        })
-        .where(eq(schema.contracts.id, contractId));
-      // Generate installment payments only for the amount still owed after credit.
-      if (base > 0) {
-        await createInstallmentPayments({
-          contractId,
-          customerId: customerId ?? null,
-          label: '',
-          total: base,
-          count: finalCount,
-          dueDates,
-        });
-      }
-    }
+    ));
 
     reply.code(201);
     return loadFullContract(contractId);
   });
 
-  // Update a contract; items are fully replaced from the payload.
   // Edit a contract; items are fully rebuilt from the payload. Each item names
   // an explicit serviceVersionId, so keeping the original version reproduces the
   // exact original price (versions are immutable) while the user may also switch
   // an item to a different version on purpose.
   // Body: { customerId?, type?, title?, comments?, items:[{serviceVersionId, modifierIds:[]}] }
+  //
+  // Once any payment of the contract was received/paid, money edits (items,
+  // modifiers, installments, due dates) are refused with 409; header-only edits
+  // (comments, execution data, templates, customer, title...) stay allowed.
   app.put('/api/contracts/:id', async (req: any, reply) => {
     const id = parseId(req.params.id);
     if (id === null) return badRequest(reply, 'Identificador inválido.');
@@ -895,69 +1020,180 @@ export function registerContractRoutes(app: FastifyInstance) {
       quantity,
     } = req.body ?? {};
 
-    // Full contract edit (one-time): rebuild items + modifiers; title = service name.
-    // Header-only edit (items omitted) leaves line items untouched.
-    let newTitle: string | null | undefined;
-    if (Array.isArray(items)) {
-      const { rows } = await buildItems(items);
-      await db.delete(schema.contractItems).where(eq(schema.contractItems.contractId, id));
-      await persistItems(id, rows);
-      newTitle = rows[0]?.serviceName ?? null;
-      if (modifiers !== undefined) await persistContractModifiers(id, modifiers);
-    } else if (title !== undefined) {
-      newTitle = title;
-    }
+    const isMoneyEdit =
+      Array.isArray(items) ||
+      (installments !== undefined && installments !== null && installments !== '') ||
+      Array.isArray(dueDates);
+    const minInst = await getMinInstallmentValue(); // read before the transaction
 
-    await db
-      .update(schema.contracts)
-      .set({
-        ...(customerId !== undefined ? { customerId } : {}),
-        ...(type !== undefined ? { type } : {}),
-        ...(newTitle !== undefined ? { title: newTitle } : {}),
-        ...(comments !== undefined ? { comments } : {}),
-        ...(templateId !== undefined ? { templateId: templateId ?? null } : {}),
-        ...(invoiceTemplateId !== undefined ? { invoiceTemplateId: invoiceTemplateId ?? null } : {}),
-        ...(receiptTemplateId !== undefined ? { receiptTemplateId: receiptTemplateId ?? null } : {}),
-        ...(executionDate !== undefined ? { executionDate: executionDate || null } : {}),
-        ...(executionTime !== undefined ? { executionTime: executionTime ?? null } : {}),
-        ...(executionAddress !== undefined ? { executionAddress: executionAddress ?? null } : {}),
-        ...(duration !== undefined ? { duration: duration ?? null } : {}),
-        ...(quantity !== undefined
-          ? { quantity: quantity != null && quantity !== '' ? Number(quantity) : null }
-          : {}),
-      })
-      .where(eq(schema.contracts.id, id));
+    // Snapshot the new items before opening the transaction (catalog reads only).
+    const built = Array.isArray(items) ? await buildItems(items) : null;
 
-    const total = await recomputeContractTotal(id);
+    try {
+      await withNumberRetry(() => db.transaction(async (tx) => {
+        // Lock the contract row first, then check received payments, so a payment
+        // received meanwhile cannot slip between the check and the rebuild.
+        const [locked] = await tx.select().from(schema.contracts).where(eq(schema.contracts.id, id)).for('update');
+        if (!locked) throw new HttpError(404, 'Registro não encontrado.');
+        // A real type change is also blocked once money came in (a no-op type is ignored).
+        const isTypeChange = type !== undefined && type !== locked.type;
+        if (isMoneyEdit || isTypeChange) {
+          const invs = await tx
+            .select({ id: schema.invoices.id })
+            .from(schema.invoices)
+            .where(eq(schema.invoices.contractId, id));
+          const settled = await countSettledPayments({ contractId: id, invoiceIds: invs.map((i) => i.id) }, tx);
+          if (settled > 0) {
+            throw new HttpError(
+              409,
+              isMoneyEdit
+                ? 'Não é possível alterar valores ou parcelas: já há pagamento(s) recebido(s) neste contrato.'
+                : 'Não é possível alterar o tipo do contrato: já há pagamento(s) recebido(s) neste contrato.'
+            );
+          }
+        }
 
-    // Resolve + store installment count against the new total.
-    let count: number | undefined;
-    if (installments !== undefined) {
-      count = Math.min(Math.max(1, Number(installments) || 1), await maxInstallmentsFor(total));
-      await db.update(schema.contracts).set({ installments: count }).where(eq(schema.contracts.id, id));
-    }
+        // Full contract edit (one-time): rebuild items + modifiers; title = service name.
+        // Header-only edit (items omitted) leaves line items untouched.
+        let newTitle: string | null | undefined;
+        if (built) {
+          await tx.delete(schema.contractItems).where(eq(schema.contractItems.contractId, id));
+          await persistItems(id, built.rows, tx);
+          newTitle = built.rows[0]?.serviceName ?? null;
+          if (modifiers !== undefined) await persistContractModifiers(id, modifiers, tx);
+        } else if (title !== undefined) {
+          newTitle = title;
+        }
 
-    // Regenerate the contract-level installment payments when the client sends
-    // due dates (i.e., the full contract form was submitted, not a header-only edit).
-    if (Array.isArray(dueDates)) {
-      await db
-        .delete(schema.payments)
-        .where(and(eq(schema.payments.contractId, id), isNull(schema.payments.invoiceId)));
-      await createInstallmentPayments({
-        contractId: id,
-        customerId: customerId ?? existing.customerId,
-        label: '',
-        total,
-        count: count ?? (Number(existing.installments) || 1),
-        dueDates,
-      });
+        await tx
+          .update(schema.contracts)
+          .set({
+            ...(customerId !== undefined ? { customerId } : {}),
+            ...(type !== undefined ? { type } : {}),
+            ...(newTitle !== undefined ? { title: newTitle } : {}),
+            ...(comments !== undefined ? { comments } : {}),
+            ...(templateId !== undefined ? { templateId: templateId ?? null } : {}),
+            ...(invoiceTemplateId !== undefined ? { invoiceTemplateId: invoiceTemplateId ?? null } : {}),
+            ...(receiptTemplateId !== undefined ? { receiptTemplateId: receiptTemplateId ?? null } : {}),
+            ...(executionDate !== undefined ? { executionDate: executionDate || null } : {}),
+            ...(executionTime !== undefined ? { executionTime: executionTime ?? null } : {}),
+            ...(executionAddress !== undefined ? { executionAddress: executionAddress ?? null } : {}),
+            ...(duration !== undefined ? { duration: duration ?? null } : {}),
+            ...(quantity !== undefined
+              ? { quantity: quantity != null && quantity !== '' ? Number(quantity) : null }
+              : {}),
+          })
+          .where(eq(schema.contracts.id, id));
+
+        const total = await recomputeContractTotal(id, tx);
+
+        // The stored credit stays applied; installments are split on the NET total.
+        const creditApplied = Number(locked.creditApplied ?? 0);
+        if (isMoneyEdit && creditApplied > 0 && total < creditApplied) {
+          throw new HttpError(400, 'O valor do contrato ficou menor que o crédito aplicado.');
+        }
+        const base = Math.max(0, round2(total - creditApplied));
+
+        // Resolve + store the installment count against the new net total.
+        let count: number | undefined;
+        if (isMoneyEdit) {
+          count =
+            base > 0
+              ? Math.min(
+                  Math.max(1, Number(installments ?? locked.installments) || 1),
+                  await maxInstallmentsFor(base, minInst)
+                )
+              : 0;
+          await tx.update(schema.contracts).set({ installments: count }).where(eq(schema.contracts.id, id));
+        }
+
+        // Regenerate the contract-level installment payments on every money edit, so the
+        // stored count and the rows always agree (missing due dates stay empty). Only
+        // installment rows are replaced: extra payments (no installment number) are never
+        // touched. Recurring contracts have no contract-level installments.
+        if (isMoneyEdit && (type ?? locked.type) !== 'invoice') {
+          await tx
+            .delete(schema.payments)
+            .where(
+              and(
+                eq(schema.payments.contractId, id),
+                isNull(schema.payments.invoiceId),
+                isNotNull(schema.payments.installmentNumber)
+              )
+            );
+          if (base > 0) {
+            await createInstallmentPayments(
+              {
+                contractId: id,
+                customerId: customerId ?? locked.customerId,
+                label: '',
+                total: base,
+                count: count ?? 1,
+                dueDates,
+              },
+              tx
+            );
+          }
+        }
+      }));
+    } catch (e) {
+      if (e instanceof HttpError) return reply.code(e.status).send({ error: e.message });
+      throw e;
     }
 
     return loadFullContract(id);
   });
 
+  // Delete a contract. Blocked while any of its payments (direct or via its
+  // invoices) was already received/paid. Otherwise the customer credit it consumed
+  // (the contract's own and each invoice's) is reinstated, its payments, invoices
+  // and documents go with it (cascade) and the generated files are removed.
   app.delete('/api/contracts/:id', async (req: any, reply) => {
-    await db.delete(schema.contracts).where(eq(schema.contracts.id, Number(req.params.id)));
+    const id = parseId(req.params.id);
+    if (id === null) return badRequest(reply, 'Identificador inválido.');
+    let fileNames: string[] = [];
+    try {
+      await withNumberRetry(() => db.transaction(async (tx) => {
+        const [contract] = await tx.select().from(schema.contracts).where(eq(schema.contracts.id, id)).for('update');
+        if (!contract) throw new HttpError(404, 'Registro não encontrado.');
+        const invoices = await tx.select().from(schema.invoices).where(eq(schema.invoices.contractId, id));
+
+        if ((await countSettledPayments({ contractId: id, invoiceIds: invoices.map((i) => i.id) }, tx)) > 0) {
+          throw new HttpError(409, 'Não é possível excluir: já há pagamento(s) recebido(s)/pago(s) neste contrato.');
+        }
+
+        // Reinstate the credit consumed: the contract's own (one-time) and each
+        // invoice's (recurring). They are disjoint, so nothing is counted twice.
+        // Credits are locked in ascending id order (same order everywhere: no deadlocks).
+        const withCredit = [contract, ...invoices]
+          .filter((d) => d.creditId)
+          .sort((a, b) => Number(a.creditId) - Number(b.creditId));
+        for (const d of withCredit) await reinstateInvoiceCredit(d, tx);
+
+        const docs = await tx
+          .select({ fileName: schema.contractDocuments.fileName })
+          .from(schema.contractDocuments)
+          .where(eq(schema.contractDocuments.contractId, id));
+        fileNames = docs.map((d) => d.fileName);
+
+        await tx.delete(schema.contracts).where(eq(schema.contracts.id, id)); // cascades items, invoices, payments, documents
+      }));
+    } catch (e) {
+      if (e instanceof HttpError) return reply.code(e.status).send({ error: e.message });
+      throw e;
+    }
+
+    // After commit: remove the generated files (only inside the contracts folder).
+    for (const name of fileNames) {
+      const file = documentPath(name);
+      if (file && fs.existsSync(file)) {
+        try {
+          fs.unlinkSync(file);
+        } catch {
+          /* ignore filesystem errors; the records are already gone */
+        }
+      }
+    }
     return reply.code(204).send();
   });
 
@@ -1093,29 +1329,52 @@ export function registerContractRoutes(app: FastifyInstance) {
     const [contract] = await db.select().from(schema.contracts).where(eq(schema.contracts.id, contractId));
     if (!contract) return reply.code(404).send({ error: 'Contrato não encontrado.' });
 
-    // Only bill items that belong to this contract and are still unbilled.
-    const items = await db
-      .select()
-      .from(schema.contractItems)
-      .where(inArray(schema.contractItems.id, itemIds.map((n: any) => Number(n))));
-    const billable = items.filter((it) => it.contractId === contractId && !it.invoiceId);
-    if (billable.length === 0) return reply.code(400).send({ error: 'nenhum item válido para faturar' });
+    const minInst = await getMinInstallmentValue(); // read before the transaction
+    try {
+      // The in-process mutex serializes reference allocation on this server; the
+      // contract row lock (same order as invoice edit/delete: contract, payments,
+      // credits) serializes invoices on one contract; the unique index + retry
+      // arbitrate between machines.
+      await withMutex('invoice-ref', () =>
+        withNumberRetry(() =>
+          db.transaction(async (tx) => {
+            const [locked] = await tx
+              .select()
+              .from(schema.contracts)
+              .where(eq(schema.contracts.id, contractId))
+              .for('update');
+            if (!locked) throw new HttpError(404, 'Contrato não encontrado.');
 
-    // Insert the invoice shell (keeps its sequential refNumber), then compose it.
-    const invRes: any = await db
-      .insert(schema.invoices)
-      .values({
-        contractId,
-        refNumber: await nextInvoiceRefNumber(),
-        discountPercent: '0',
-        installments: 0,
-        total: '0',
-      })
-      .$returningId();
-    const invoiceId = invRes[0].id;
+            // Only bill items that belong to this contract and are still unbilled
+            // (re-read under the lock).
+            const items = await tx
+              .select()
+              .from(schema.contractItems)
+              .where(inArray(schema.contractItems.id, itemIds.map((n: any) => Number(n))));
+            const billable = items.filter((it) => it.contractId === contractId && !it.invoiceId);
+            if (billable.length === 0) throw new HttpError(400, 'nenhum item válido para faturar');
 
-    await composeInvoice(invoiceId, contractId, contract.customerId, req.body, billable);
-    await recomputeContractTotal(contractId);
+            const invRes: any = await tx
+              .insert(schema.invoices)
+              .values({
+                contractId,
+                refNumber: await nextInvoiceRefNumber(tx),
+                discountPercent: '0',
+                installments: 0,
+                total: '0',
+              })
+              .$returningId();
+            const invoiceId = invRes[0].id;
+
+            await composeInvoice(invoiceId, contractId, locked.customerId, req.body, billable, true, tx, minInst);
+            await recomputeContractTotal(contractId, tx);
+          })
+        )
+      );
+    } catch (e) {
+      if (e instanceof HttpError) return reply.code(e.status).send({ error: e.message });
+      throw e;
+    }
     reply.code(201);
     return loadFullContract(contractId);
   });
@@ -1135,39 +1394,57 @@ export function registerContractRoutes(app: FastifyInstance) {
     }
     const invError = invoiceBodyError(req.body);
     if (invError) return badRequest(reply, invError);
-    const [contract] = await db.select().from(schema.contracts).where(eq(schema.contracts.id, inv.contractId));
-    if (!contract) return reply.code(404).send({ error: 'Contrato não encontrado.' });
+    const minInst = await getMinInstallmentValue(); // read before the transaction
+    try {
+      await withNumberRetry(() =>
+        db.transaction(async (tx) => {
+          // Lock order everywhere: contract row, then payments, then credits. Re-reading
+          // everything under the contract lock makes a concurrent contract delete or
+          // invoice edit wait (so a credit can't be reinstated twice).
+          const [contract] = await tx
+            .select()
+            .from(schema.contracts)
+            .where(eq(schema.contracts.id, inv.contractId))
+            .for('update');
+          if (!contract) throw new HttpError(404, 'Contrato não encontrado.');
+          const [cur] = await tx.select().from(schema.invoices).where(eq(schema.invoices.id, invoiceId));
+          if (!cur) throw new HttpError(404, 'Registro não encontrado.');
 
-    // Cannot edit once money has come in: any installment already received/sent.
-    const invPayments = await db.select().from(schema.payments).where(eq(schema.payments.invoiceId, invoiceId));
-    if (invPayments.some((p) => p.receiptStatus !== 'open')) {
-      return reply.code(409).send({ error: 'fatura com parcela já recebida não pode ser editada' });
+          // Cannot edit once money has come in: any installment already received/sent.
+          if ((await countSettledPayments({ invoiceIds: [invoiceId] }, tx)) > 0) {
+            throw new HttpError(409, 'fatura com parcela já recebida não pode ser editada');
+          }
+
+          // Candidate items: belong to this contract AND are either unbilled or already
+          // on THIS invoice (validate before mutating anything).
+          const chosen = await tx
+            .select()
+            .from(schema.contractItems)
+            .where(inArray(schema.contractItems.id, itemIds.map((n: any) => Number(n))));
+          const billable = chosen.filter(
+            (it) => it.contractId === cur.contractId && (!it.invoiceId || it.invoiceId === invoiceId)
+          );
+          if (billable.length === 0) throw new HttpError(400, 'nenhum item válido para faturar');
+
+          // Undo the old composition: reinstate applied credit, unbill its items, drop
+          // its payments/modifiers/generated documents (all stale after an edit).
+          await reinstateInvoiceCredit(cur, tx);
+          await tx
+            .update(schema.contractItems)
+            .set({ invoiceId: null })
+            .where(eq(schema.contractItems.invoiceId, invoiceId));
+          await tx.delete(schema.payments).where(eq(schema.payments.invoiceId, invoiceId));
+          await tx.delete(schema.invoiceModifiers).where(eq(schema.invoiceModifiers.invoiceId, invoiceId));
+          await tx.delete(schema.contractDocuments).where(eq(schema.contractDocuments.invoiceId, invoiceId));
+
+          await composeInvoice(invoiceId, cur.contractId, contract.customerId, req.body, billable, false, tx, minInst);
+          await recomputeContractTotal(cur.contractId, tx);
+        })
+      );
+    } catch (e) {
+      if (e instanceof HttpError) return reply.code(e.status).send({ error: e.message });
+      throw e;
     }
-
-    // Candidate items: belong to this contract AND are either unbilled or already
-    // on THIS invoice (validate before mutating anything).
-    const chosen = await db
-      .select()
-      .from(schema.contractItems)
-      .where(inArray(schema.contractItems.id, itemIds.map((n: any) => Number(n))));
-    const billable = chosen.filter(
-      (it) => it.contractId === inv.contractId && (!it.invoiceId || it.invoiceId === invoiceId)
-    );
-    if (billable.length === 0) return reply.code(400).send({ error: 'nenhum item válido para faturar' });
-
-    // Undo the old composition: reinstate applied credit, unbill its items, drop
-    // its payments/modifiers/generated documents (all stale after an edit).
-    await reinstateInvoiceCredit(inv);
-    await db
-      .update(schema.contractItems)
-      .set({ invoiceId: null })
-      .where(eq(schema.contractItems.invoiceId, invoiceId));
-    await db.delete(schema.payments).where(eq(schema.payments.invoiceId, invoiceId));
-    await db.delete(schema.invoiceModifiers).where(eq(schema.invoiceModifiers.invoiceId, invoiceId));
-    await db.delete(schema.contractDocuments).where(eq(schema.contractDocuments.invoiceId, invoiceId));
-
-    await composeInvoice(invoiceId, inv.contractId, contract.customerId, req.body, billable, false);
-    await recomputeContractTotal(inv.contractId);
     reply.code(200);
     return loadFullContract(inv.contractId);
   });
@@ -1175,16 +1452,37 @@ export function registerContractRoutes(app: FastifyInstance) {
   // Delete an invoice: reinstate any applied credit, unbill its items, remove its
   // documents + payments (cascade) + the invoice.
   app.delete('/api/invoices/:id', async (req: any, reply) => {
-    const invoiceId = Number(req.params.id);
+    const invoiceId = parseId(req.params.id);
+    if (invoiceId === null) return badRequest(reply, 'Identificador inválido.');
     const [inv] = await db.select().from(schema.invoices).where(eq(schema.invoices.id, invoiceId));
     if (!inv) return reply.code(404).send({ error: 'Registro não encontrado.' });
-    await reinstateInvoiceCredit(inv);
-    await db
-      .update(schema.contractItems)
-      .set({ invoiceId: null })
-      .where(eq(schema.contractItems.invoiceId, invoiceId));
-    await db.delete(schema.invoices).where(eq(schema.invoices.id, invoiceId)); // cascades documents + payments
-    await recomputeContractTotal(inv.contractId);
+    try {
+      await withNumberRetry(() =>
+        db.transaction(async (tx) => {
+          // Same lock order as contract delete / invoice edit: contract row first, then
+          // re-read the invoice (it may have been deleted/edited meanwhile).
+          await tx.select().from(schema.contracts).where(eq(schema.contracts.id, inv.contractId)).for('update');
+          const [cur] = await tx.select().from(schema.invoices).where(eq(schema.invoices.id, invoiceId));
+          if (!cur) return; // already gone: nothing to reinstate twice
+          if ((await countSettledPayments({ invoiceIds: [invoiceId] }, tx)) > 0) {
+            throw new HttpError(
+              409,
+              'Não é possível excluir: já há pagamento(s) recebido(s) nesta fatura. Para cancelar uma fatura com pagamentos recebidos será necessário o processo de rescisão (ainda não implementado).'
+            );
+          }
+          await reinstateInvoiceCredit(cur, tx);
+          await tx
+            .update(schema.contractItems)
+            .set({ invoiceId: null })
+            .where(eq(schema.contractItems.invoiceId, invoiceId));
+          await tx.delete(schema.invoices).where(eq(schema.invoices.id, invoiceId)); // cascades documents + payments
+          await recomputeContractTotal(cur.contractId, tx);
+        })
+      );
+    } catch (e) {
+      if (e instanceof HttpError) return reply.code(e.status).send({ error: e.message });
+      throw e;
+    }
     return reply.code(204).send();
   });
 

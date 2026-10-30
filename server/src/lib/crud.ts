@@ -55,7 +55,16 @@ function pickFields(
 // `table` is a Drizzle mysqlTable and `fields` the whitelist of writable columns.
 // Typing is kept loose on purpose so this single helper can serve every simple resource.
 // MySQL has no RETURNING, so create/update insert-or-update then re-select.
-export function registerCrud(app: FastifyInstance, prefix: string, table: any, fields: Record<string, FieldSpec>) {
+//
+// Optional `beforeDelete(id)` guard: return a pt-BR message to refuse the delete with
+// HTTP 409 (nothing is deleted), or null/undefined to let it proceed.
+export function registerCrud(
+  app: FastifyInstance,
+  prefix: string,
+  table: any,
+  fields: Record<string, FieldSpec>,
+  opts: { beforeDelete?: (id: number) => Promise<string | null | undefined> } = {}
+) {
   const byId = (id: number) => db.select().from(table).where(eq(table.id, id));
 
   app.get(prefix, async () => {
@@ -95,6 +104,10 @@ export function registerCrud(app: FastifyInstance, prefix: string, table: any, f
   app.delete(`${prefix}/:id`, async (req: any, reply) => {
     const id = parseId(req.params.id);
     if (id == null) return badId(reply);
+    if (opts.beforeDelete) {
+      const blocked = await opts.beforeDelete(id);
+      if (blocked) return reply.code(409).send({ error: blocked });
+    }
     await db.delete(table).where(eq(table.id, id));
     return reply.code(204).send();
   });

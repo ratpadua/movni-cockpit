@@ -387,82 +387,86 @@ export function registerBankRoutes(app: FastifyInstance) {
     }
 
     // ---- 2) Write ------------------------------------------------------------------
-    let received = 0;
-    let created = 0;
+    // The whole import (import record, payments, receipts, transactions) is atomic.
+    const { received, created } = await db.transaction(async (tx) => {
+      let received = 0;
+      let created = 0;
 
-    // Record this import and each of its lines, so a later upload of the same
-    // statement can flag them as "already imported".
-    const { fileName, bankId, accountId } = req.body ?? {};
-    const impRes: any = await db
-      .insert(schema.bankImports)
-      .values({
-        fileName: String(fileName || 'extrato.ofx').slice(0, 512),
-        bankId: bankId != null ? String(bankId).slice(0, 64) : null,
-        accountId: accountId != null ? String(accountId).slice(0, 64) : null,
-        itemCount: items.length,
-      })
-      .$returningId();
-    const importId: number = impRes[0].id;
-    const record = (pr: Prepared, paymentId: number | null) =>
-      db.insert(schema.transactions).values({
-        importId,
-        fitId: pr.it.fitId ? String(pr.it.fitId).slice(0, 255) : null,
-        date: pr.date,
-        description: pr.it.type ? String(pr.it.type).slice(0, 512) : null,
-        memo: pr.it.description ? String(pr.it.description).slice(0, 512) : null,
-        amount: String(pr.amount),
-        origDate: pr.origDate,
-        origAmount: String(pr.origAmount),
-        flow: pr.flow,
-        categoryId: pr.categoryId,
-        matchedPaymentId: paymentId,
-        imported: true,
-      });
+      // Record this import and each of its lines, so a later upload of the same
+      // statement can flag them as "already imported".
+      const { fileName, bankId, accountId } = req.body ?? {};
+      const impRes: any = await tx
+        .insert(schema.bankImports)
+        .values({
+          fileName: String(fileName || 'extrato.ofx').slice(0, 512),
+          bankId: bankId != null ? String(bankId).slice(0, 64) : null,
+          accountId: accountId != null ? String(accountId).slice(0, 64) : null,
+          itemCount: items.length,
+        })
+        .$returningId();
+      const importId: number = impRes[0].id;
+      const record = (pr: Prepared, paymentId: number | null) =>
+        tx.insert(schema.transactions).values({
+          importId,
+          fitId: pr.it.fitId ? String(pr.it.fitId).slice(0, 255) : null,
+          date: pr.date,
+          description: pr.it.type ? String(pr.it.type).slice(0, 512) : null,
+          memo: pr.it.description ? String(pr.it.description).slice(0, 512) : null,
+          amount: String(pr.amount),
+          origDate: pr.origDate,
+          origAmount: String(pr.origAmount),
+          flow: pr.flow,
+          categoryId: pr.categoryId,
+          matchedPaymentId: paymentId,
+          imported: true,
+        });
 
-    for (const pr of prepared) {
-      const { it, date, flow } = pr;
-      const amount = Math.abs(pr.amount);
+      for (const pr of prepared) {
+        const { it, date, flow } = pr;
+        const amount = Math.abs(pr.amount);
 
-      if (pr.matchedPaymentId !== null) {
-        await db
-          .update(schema.payments)
-          .set({ receiptStatus: 'received', receivedDate: date })
-          .where(eq(schema.payments.id, pr.matchedPaymentId));
-        await record(pr, pr.matchedPaymentId);
-        received++;
-        continue;
+        if (pr.matchedPaymentId !== null) {
+          await tx
+            .update(schema.payments)
+            .set({ receiptStatus: 'received', receivedDate: date })
+            .where(eq(schema.payments.id, pr.matchedPaymentId));
+          await record(pr, pr.matchedPaymentId);
+          received++;
+          continue;
+        }
+
+        const base: any = {
+          description: String(it.description || it.type || 'Lançamento bancário').slice(0, 255),
+          amount: String(amount),
+          flow,
+          categoryId: pr.categoryId,
+          dueDate: date,
+        };
+        if (flow === 'in') {
+          base.receiptStatus = 'received';
+          base.receivedDate = date;
+          base.status = 'upcoming';
+        } else {
+          base.status = 'done';
+          base.paidDate = date;
+        }
+        // Associate the income to a contract as an EXTRA payment: linked to the
+        // contract (and its customer) but with no installment, so it never changes
+        // the contract's value or installments.
+        if (pr.contractId !== null) {
+          base.contractId = pr.contractId;
+          const [ct] = await tx
+            .select({ customerId: schema.contracts.customerId })
+            .from(schema.contracts)
+            .where(eq(schema.contracts.id, pr.contractId));
+          if (ct?.customerId) base.customerId = ct.customerId;
+        }
+        const payRes: any = await tx.insert(schema.payments).values(base).$returningId();
+        await record(pr, payRes[0].id);
+        created++;
       }
-
-      const base: any = {
-        description: String(it.description || it.type || 'Lançamento bancário').slice(0, 255),
-        amount: String(amount),
-        flow,
-        categoryId: pr.categoryId,
-        dueDate: date,
-      };
-      if (flow === 'in') {
-        base.receiptStatus = 'received';
-        base.receivedDate = date;
-        base.status = 'upcoming';
-      } else {
-        base.status = 'done';
-        base.paidDate = date;
-      }
-      // Associate the income to a contract as an EXTRA payment: linked to the
-      // contract (and its customer) but with no installment, so it never changes
-      // the contract's value or installments.
-      if (pr.contractId !== null) {
-        base.contractId = pr.contractId;
-        const [ct] = await db
-          .select({ customerId: schema.contracts.customerId })
-          .from(schema.contracts)
-          .where(eq(schema.contracts.id, pr.contractId));
-        if (ct?.customerId) base.customerId = ct.customerId;
-      }
-      const payRes: any = await db.insert(schema.payments).values(base).$returningId();
-      await record(pr, payRes[0].id);
-      created++;
-    }
+      return { received, created };
+    });
 
     return reply.code(201).send({ received, created, imported: received + created });
   });

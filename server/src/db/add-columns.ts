@@ -105,6 +105,13 @@ const CONSTRAINTS: { table: string; name: string; ddl: string }[] = [
   },
 ];
 
+// Unique indexes (numbering). Added only when the table has no duplicate values yet;
+// with duplicates (production drift) the index is skipped with a warning.
+const UNIQUE_INDEXES: { table: string; index: string; column: string }[] = [
+  { table: 'contracts', index: 'contracts_number_uq', column: 'number' },
+  { table: 'invoices', index: 'invoices_ref_number_uq', column: 'ref_number' },
+];
+
 async function main() {
   const host = process.env.DB_HOST;
   const database = process.env.DB_NAME;
@@ -164,8 +171,45 @@ async function main() {
     fks++;
   }
 
-  console.log(`Done. ${added} coluna(s) e ${fks} chave(s) estrangeira(s) adicionada(s).`);
+  // 4) Unique indexes (after the columns exist).
+  let uniques = 0;
+  let skipped = 0;
+  for (const u of UNIQUE_INDEXES) {
+    const [rows] = await conn.query<any[]>(
+      'SELECT 1 FROM information_schema.statistics WHERE table_schema = ? AND table_name = ? AND index_name = ?',
+      [database, u.table, u.index]
+    );
+    if (rows.length > 0) {
+      console.log(`  ok     índice único ${u.index} — já existe`);
+      continue;
+    }
+    const [dups] = await conn.query<any[]>(
+      `SELECT \`${u.column}\` AS v, COUNT(*) AS n FROM \`${u.table}\` WHERE \`${u.column}\` IS NOT NULL GROUP BY \`${u.column}\` HAVING COUNT(*) > 1 LIMIT 10`
+    );
+    if (dups.length > 0) {
+      console.warn(
+        `  AVISO  índice único ${u.index} NÃO criado: há valores duplicados em ${u.table}.${u.column} (${dups
+          .map((d) => d.v)
+          .join(', ')}). Corrija os duplicados e rode de novo.`
+      );
+      skipped++;
+      continue;
+    }
+    await conn.query(`ALTER TABLE \`${u.table}\` ADD UNIQUE INDEX \`${u.index}\` (\`${u.column}\`)`);
+    console.log(`  added  índice único ${u.index}`);
+    uniques++;
+  }
+
+  console.log(
+    `Done. ${added} coluna(s), ${fks} chave(s) estrangeira(s) e ${uniques} índice(s) único(s) adicionada(s).`
+  );
   await conn.end();
+  if (skipped > 0) {
+    console.warn(
+      `ATENÇÃO: ${skipped} índice(s) NÃO criado(s) por duplicatas: corrija os números duplicados e rode novamente.`
+    );
+    process.exitCode = 1;
+  }
 }
 
 main().catch((err) => {

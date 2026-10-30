@@ -86,6 +86,8 @@ export default function ContractFormModal({
   const [execTime, setExecTime] = useState('');
   const [execAddress, setExecAddress] = useState('');
   const [plan, setPlan] = useState<InstallmentValue>({ count: 1, dueDates: [todayIso()] });
+  // Editing a contract that already has a received/paid payment: values and installments are locked.
+  const [hasReceived, setHasReceived] = useState(false);
 
   const { data: credits = [] } = useQuery({
     queryKey: ['/customers', customerId, 'credits'],
@@ -127,6 +129,7 @@ export default function ContractFormModal({
     setExecTime('');
     setExecAddress('');
     setPlan({ count: 1, dueDates: [todayIso()] });
+    setHasReceived(false);
   };
 
   const loadForEdit = async (id: number) => {
@@ -147,6 +150,11 @@ export default function ContractFormModal({
     setModifiers(d.modifiers.map((m) => ({ name: m.name, price: Number(m.price), disc: Number(m.discountPercent) || 0 })));
     const dueDates = d.payments.filter((p) => p.installmentNumber).map((p) => p.dueDate ?? todayIso());
     setPlan({ count: d.installments || dueDates.length || 1, dueDates: dueDates.length ? dueDates : [todayIso()] });
+    setHasReceived(
+      [...d.payments, ...(d.invoices ?? []).flatMap((i) => i.payments ?? [])].some((p) =>
+        p.flow === 'out' ? p.status === 'done' : p.receiptStatus === 'received' || p.receiptStatus === 'sent'
+      )
+    );
 
     const item = d.items[0];
     if (d.type === 'contract' && item && item.serviceId) {
@@ -251,6 +259,14 @@ export default function ContractFormModal({
           .filter((m) => m.name)
           .map((m) => ({ name: m.name, price: Number(m.price) || 0, discountPercent: Number(m.disc) || 0 })),
       };
+      if (editingId && hasReceived) {
+        // Money is locked once a payment was received: send only the header fields.
+        delete payload.items;
+        delete payload.modifiers;
+        delete payload.installments;
+        delete payload.dueDates;
+        delete payload.creditId;
+      }
       return editingId ? api.put(`/contracts/${editingId}`, payload) : api.post('/contracts', payload);
     },
     onSuccess: (res: any) => {
@@ -268,6 +284,11 @@ export default function ContractFormModal({
   return (
     <Modal opened={opened} onClose={onClose} title={editingId ? `Editar contrato #${editingId}` : 'Novo contrato'} size="xl">
       <Stack>
+        {editingId && hasReceived && !isRecurring && (
+          <Alert icon={<IconInfoCircle size={16} />} color="yellow" variant="light">
+            Já há pagamento(s) recebido(s) neste contrato: serviço, valores e parcelas não podem ser alterados. Os demais dados (observações, execução, modelos, cliente) continuam editáveis.
+          </Alert>
+        )}
         <Group grow>
           <Select label="Cliente" placeholder="Selecione" data={customers.map((c) => ({ value: String(c.id), label: c.name }))} value={customerId} onChange={(v) => { setCustomerId(v); setCreditId(null); }} searchable required />
           <Select
