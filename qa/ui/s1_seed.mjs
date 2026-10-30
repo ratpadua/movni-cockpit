@@ -52,11 +52,13 @@ for (const s of ['agendado', 'realizado', 'em_edicao']) mustOk(await api('PUT', 
 st.R1 = mustOk(await api('POST', '/api/contracts', { customerId: st.cu.id, type: 'invoice', title: 'QAZ Recorrente', invoiceTemplateId: st.tI.id, receiptTemplateId: st.tR.id }), 'R1');
 
 // payments for Painel / Fluxo de Caixa
+// (the 'current month' checks need these inside the current month, also on the last days of a month)
+const soon = (n) => { const x = L.addDays(today, n); return x.slice(0, 7) === today.slice(0, 7) ? x : today; };
 const pay = async (o) => mustOk(await api('POST', '/api/payments', o), 'payment ' + o.description);
 st.pLateIn = await pay({ description: 'QAZ-UI entrada atrasada', amount: '123.45', flow: 'in', dueDate: '2026-09-15', customerId: st.cu.id, categoryId: st.catIn.id });
 st.pLateOut = await pay({ description: 'QAZ-UI saida atrasada', amount: '67.89', flow: 'out', dueDate: '2026-09-20', categoryId: st.catOut.id });
-st.pOpenIn = await pay({ description: 'QAZ-UI entrada aberta', amount: '1234.56', flow: 'in', dueDate: L.addDays(today, 2), customerId: st.cu.id, contractId: st.C1.id, categoryId: st.catIn.id });
-st.pOpenOut = await pay({ description: 'QAZ-UI saida a pagar', amount: '1000', flow: 'out', dueDate: L.addDays(today, 1), categoryId: st.catAgua.id });
+st.pOpenIn = await pay({ description: 'QAZ-UI entrada aberta', amount: '1234.56', flow: 'in', dueDate: soon(2), customerId: st.cu.id, contractId: st.C1.id, categoryId: st.catIn.id });
+st.pOpenOut = await pay({ description: 'QAZ-UI saida a pagar', amount: '1000', flow: 'out', dueDate: soon(1), categoryId: st.catAgua.id });
 st.pRecv = await pay({ description: 'QAZ-UI entrada recebida', amount: '50', flow: 'in', dueDate: today, receiptStatus: 'received', receivedDate: today, customerId: st.cu.id });
 st.pSent = await pay({ description: 'QAZ-UI entrada enviada', amount: '40', flow: 'in', dueDate: today, receiptStatus: 'sent', receivedDate: today, customerId: st.cu.id });
 st.pDone = await pay({ description: 'QAZ-UI saida paga', amount: '30', flow: 'out', dueDate: today, status: 'done', paidDate: today });

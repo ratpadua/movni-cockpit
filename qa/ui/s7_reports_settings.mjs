@@ -53,18 +53,10 @@ await S.flow('Configuracoes (Aparencia)', async () => {
   await L.shot(page, 'configuracoes');
   const menu = page.getByLabel('Cor do menu');
   const bgOf = async () => page.locator('nav, .mantine-AppShell-navbar').first().evaluate((e) => getComputedStyle(e).backgroundColor);
-  // #rgb
+  // #rgb is no longer accepted by the form: only #RRGGBB (inline error, save disabled)
   await menu.fill('#abc'); await menu.press('Tab');
-  console.log('  after typing #abc, field =', await menu.inputValue());
-  await page.getByRole('button', { name: 'Salvar cores' }).click();
-  ok('toast "Aparência salva" (#rgb)', await U.toast(page, /Aparência salva/));
-  await page.waitForTimeout(800);
+  ok('short #abc: inline "Cor inválida. Use o formato #RRGGBB." and "Salvar cores" disabled', await page.getByText('Cor inválida. Use o formato #RRGGBB.').first().isVisible() && await page.getByRole('button', { name: 'Salvar cores' }).isDisabled());
   let s = await settings();
-  ok('API: #abc stored as #aabbcc (expanded)', /^#aabbcc$/i.test(s.menuColor), s.menuColor);
-  await page.waitForTimeout(500);
-  const bg1 = await bgOf();
-  ok('menu background changed to #aabbcc (rgb(170,187,204))', /rgb\(170, 187, 204\)/.test(bg1), bg1);
-  await L.shot(page, 'configuracoes_cor_rgb');
   // #rrggbb
   await U.clearToasts(page);
   await menu.fill('#12AB34'); await menu.press('Tab');
@@ -73,15 +65,25 @@ await S.flow('Configuracoes (Aparencia)', async () => {
   await page.waitForTimeout(800);
   s = await settings();
   ok('API: #12AB34 stored', /^#12ab34$/i.test(s.menuColor), s.menuColor);
-  // invalid
+  // invalid text: inline error, "Salvar cores" disabled, nothing invalid is sent
   await U.clearToasts(page);
+  const sentBefore = [];
+  const onReq = (rq) => { if (rq.method() === 'PUT' && /\/api\/settings/.test(rq.url())) sentBefore.push(rq.postData() || ''); };
+  page.on('request', onReq);
   await menu.fill('zzz-invalida'); await menu.press('Tab');
-  await page.getByRole('button', { name: 'Salvar cores' }).click();
-  await page.waitForTimeout(1200);
-  const toasts = await U.toastTexts(page);
-  console.log('  invalid colour toasts:', JSON.stringify(toasts), 'field now:', await menu.inputValue());
+  const saveColors = page.getByRole('button', { name: 'Salvar cores' });
+  ok('invalid colour: inline "Cor inválida. Use o formato #RRGGBB."', await page.getByText('Cor inválida. Use o formato #RRGGBB.').first().isVisible());
+  ok('invalid colour: "Salvar cores" is disabled', await saveColors.isDisabled());
+  await saveColors.click({ force: true }).catch(() => {});
+  await page.waitForTimeout(800);
+  ok('invalid colour: nothing was sent to the server', sentBefore.length === 0, JSON.stringify(sentBefore));
   s = await settings();
-  ok('invalid colour text is never stored (the previous colour #12AB34 is kept)', /^#12ab34$/i.test(s.menuColor), JSON.stringify([toasts, s.menuColor]));
+  ok('invalid colour text is never stored (the previous colour #12AB34 is kept)', /^#12ab34$/i.test(s.menuColor), s.menuColor);
+  await L.shot(page, 'configuracoes_cor_invalida');
+  await menu.fill('#34AB12'); await menu.press('Tab');
+  ok('valid colour clears the error and re-enables "Salvar cores"', !(await page.getByText('Cor inválida. Use o formato #RRGGBB.').first().isVisible().catch(() => false)) && (await saveColors.isEnabled()));
+  page.off('request', onReq);
+  await menu.fill('#12AB34'); await menu.press('Tab');
   console.log('  (ColorInput reverts invalid text on blur and the form saves the last valid colour; the server answers 400 "Cor inválida" if invalid text is ever sent: covered by the API suite)');
   S.expectBad.push(/400 PUT \/api\/settings/);
   await L.shot(page, 'configuracoes_cor_invalida');

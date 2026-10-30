@@ -293,8 +293,17 @@ await S.flow('Contratos: editar contrato (modal) e excluir', async () => {
   await page.waitForTimeout(700);
   eq('API: comments updated', (await api('GET', `/api/contracts/${id}`)).body.comments, 'QAZ comentário editado');
   // delete from list (native confirm)
+  // a contract with a RECEIVED payment cannot be deleted (409): first the blocked attempt, then re-open the payment
+  S.expectBad.push(/409 DELETE \/api\/contracts/);
   S.dialogs.length = 0;
   const rowU = page.locator('tr').filter({ hasText: (await api('GET', `/api/contracts/${id}`)).body.number }).first();
+  await U.clearToasts(page);
+  await rowU.getByTitle('Excluir').click();
+  ok('UI: delete with a received payment is refused with the pt-BR message', await U.toast(page, /Não é possível excluir: já há pagamento\(s\) recebido\(s\)\/pago\(s\)/), JSON.stringify(await U.toastTexts(page)));
+  eq('API: contract still exists after the refused delete', (await api('GET', `/api/contracts/${id}`)).status, 200);
+  for (const p of (await api('GET', '/api/payments')).body.filter((p) => p.contractId === id && (p.receiptStatus !== 'open' || p.status === 'done'))) await api('PUT', `/api/payments/${p.id}`, { receiptStatus: 'open', receivedDate: null, status: 'upcoming', paidDate: null });
+  S.dialogs.length = 0;
+  await U.clearToasts(page);
   await rowU.getByTitle('Excluir').click();
   await page.waitForTimeout(900);
   ok('delete contract asks confirm', S.dialogs.some((m) => /Excluir este contrato/.test(m)), JSON.stringify(S.dialogs));
