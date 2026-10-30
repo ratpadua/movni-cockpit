@@ -317,9 +317,17 @@ LibreOffice only for PDF). Steps:
 
 ## 8. Running the production migration (only when asked)
 
-Temporarily set `.env` `DB_NAME` to production **and** `.env.local` to the production user, run
-`npm --prefix server run db:add-columns`, run it a second time to confirm it reports 0 changes, then
-**restore both files to dev**. Stop the dev server first.
+**Pre-release check (mandatory before EVERY production release):** first rehearse the production path on
+the **Hostinger dev** database, with the normal `.env` + `.env.local` and **no** `DB_TARGET`: run
+`npm --prefix server run db:add-columns` twice (the 2nd run must report 0 changes; if it skips an index
+because of duplicate numbers, stop and fix the data first), then start the server and run
+`npm --prefix qa run release-smoke` (a short, gentle smoke test of ~40 requests on `QAZ-REL` temporary
+data, see `qa/README.md`). Only after both pass, and the dev data is back to its baseline, go on to production.
+
+Then, for production: temporarily set `.env` `DB_NAME` to production **and** `.env.local` to the production
+user (take a database export from the Hostinger panel first), run `npm --prefix server run db:add-columns`,
+run it a second time to confirm it reports 0 changes, then **restore both files to dev**. Stop the dev
+server first.
 
 ---
 
