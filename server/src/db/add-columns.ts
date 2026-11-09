@@ -41,6 +41,27 @@ const TABLES: { table: string; ddl: string }[] = [
         FOREIGN KEY (\`invoice_id\`) REFERENCES \`invoices\`(\`id\`) ON DELETE cascade ON UPDATE no action
     )`,
   },
+  // Multiple credits per contract/fatura: one row per credit applied (exactly one of
+  // contract_id / invoice_id is set). The FKs are inline so they exist with the table
+  // (contracts, invoices and customer_credits already exist at this point).
+  {
+    table: 'credit_applications',
+    ddl: `CREATE TABLE IF NOT EXISTS \`credit_applications\` (
+      \`id\` int AUTO_INCREMENT NOT NULL,
+      \`credit_id\` int NOT NULL,
+      \`contract_id\` int NULL,
+      \`invoice_id\` int NULL,
+      \`amount\` decimal(12,2) NOT NULL,
+      \`created_at\` timestamp NOT NULL DEFAULT (now()),
+      CONSTRAINT \`credit_applications_id\` PRIMARY KEY(\`id\`),
+      CONSTRAINT \`credit_applications_credit_id_customer_credits_id_fk\`
+        FOREIGN KEY (\`credit_id\`) REFERENCES \`customer_credits\`(\`id\`) ON DELETE restrict ON UPDATE no action,
+      CONSTRAINT \`credit_applications_contract_id_contracts_id_fk\`
+        FOREIGN KEY (\`contract_id\`) REFERENCES \`contracts\`(\`id\`) ON DELETE cascade ON UPDATE no action,
+      CONSTRAINT \`credit_applications_invoice_id_invoices_id_fk\`
+        FOREIGN KEY (\`invoice_id\`) REFERENCES \`invoices\`(\`id\`) ON DELETE cascade ON UPDATE no action
+    )`,
+  },
 ];
 
 const COLUMNS: { table: string; column: string; ddl: string }[] = [
@@ -200,8 +221,29 @@ async function main() {
     uniques++;
   }
 
+  // 5) Backfill (insert-only, idempotent): every contract/fatura that still holds a credit in
+  //    the LEGACY columns (credit_id + credit_applied) and has no credit_applications row yet
+  //    gets one row (credit_id, amount = credit_applied). A 2nd run inserts 0 rows. The legacy
+  //    columns are left untouched (dropped in a later, separate step).
+  const backfill = async (table: 'contracts' | 'invoices', fk: 'contract_id' | 'invoice_id') => {
+    const [res] = await conn.query<any>(
+      `INSERT INTO \`credit_applications\` (\`credit_id\`, \`${fk}\`, \`amount\`)
+       SELECT t.\`credit_id\`, t.\`id\`, t.\`credit_applied\` FROM \`${table}\` t
+       WHERE t.\`credit_id\` IS NOT NULL AND t.\`credit_applied\` > 0
+         AND NOT EXISTS (SELECT 1 FROM \`credit_applications\` a WHERE a.\`${fk}\` = t.\`id\`)`
+    );
+    return Number(res.affectedRows ?? 0);
+  };
+  const backfilledContracts = await backfill('contracts', 'contract_id');
+  const backfilledInvoices = await backfill('invoices', 'invoice_id');
   console.log(
-    `Done. ${added} coluna(s), ${fks} chave(s) estrangeira(s) e ${uniques} índice(s) único(s) adicionada(s).`
+    `  backfill credit_applications: ${backfilledContracts} contrato(s) e ${backfilledInvoices} fatura(s) migrado(s) das colunas antigas.`
+  );
+
+  console.log(
+    `Done. ${added} coluna(s), ${fks} chave(s) estrangeira(s) e ${uniques} índice(s) único(s) adicionada(s); ${
+      backfilledContracts + backfilledInvoices
+    } crédito(s) copiado(s) para credit_applications.`
   );
   await conn.end();
   if (skipped > 0) {

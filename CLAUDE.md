@@ -93,6 +93,8 @@ npm start                  # build the client, then serve everything on :5178
   `invoices_ref_number_uq`). If production already has duplicate numbers it skips them with a warning
   (`ATENÇÃO`, non-zero exit); until the duplicates are fixed and the script is re-run there, the
   duplicate-number retry protection is inactive on that database.
+- `add-columns.ts` also holds **data backfill steps** (currently: `credit_applications` from the legacy
+  `credit_id/credit_applied` columns). They must stay insert-only and idempotent (re-run = 0 changes).
 
 ---
 
@@ -197,8 +199,9 @@ npm start                  # build the client, then serve everything on :5178
 - **Editing a one-time contract:** once any payment of the contract was received/paid, changing items,
   modifiers, installments or due dates (and the contract type) is refused with 409; header data
   (comments, execution, templates, customer, title) stays editable. Before any receipt, installments are
-  re-split on the **net total after the applied credit** (`total − creditApplied`, still capped by
-  `maxInstallmentsFor`); if the new total is below the credit applied it answers 400. Extra payments
+  re-split on the **net total after the applied credits** (`total − creditApplied`, still capped by
+  `maxInstallmentsFor`); the edit form sends the full `credits` list (old applications reinstated, new ones
+  applied in the same transaction); if the new total is below the total of the credits applied it answers 400. Extra payments
   (no installment number) are never regenerated.
 - **Deleting a contract** is blocked (409) when any of its payments, direct or via faturas, was already
   received/paid. Otherwise the customer credit it consumed (its own and its faturas') is **reinstated**,
@@ -211,8 +214,28 @@ npm start                  # build the client, then serve everything on :5178
 - **Modifiers** (free-value lines, may be negative, with a discount %) exist on contracts and faturas.
 
 ### Customer credits
-- A customer can hold credits (description, value, remaining). Using one **reduces the amount split
+- A customer can hold credits (description, value, remaining). Using them **reduces the amount split
   into installments**; the document total shows the net, `{credit_applied}` is negative.
+- **A one-time contract or a fatura can use several credits**, each with its own editable amount
+  (`CreditPicker`: tick the credits, type how much of each; each amount ≤ that credit's available balance,
+  the sum ≤ the amount to cover). Stored one row per credit in **`credit_applications`** (`credit_id`,
+  exactly one of `contract_id` / `invoice_id`, `amount`; contract/invoice delete cascades the rows, a credit
+  with applications can't be deleted). API: `credits: [{ creditId, amount }]` on POST/PUT contract and
+  POST/PUT invoice (PUT contract: omitted = keep, list = replace; PUT invoice: the list always replaces; the
+  old single `creditId` is still accepted = as much as possible); responses carry
+  `credits: [{ creditId, description, amount }]` + `creditApplied` (the total). Credits are applied
+  **before** the installments are split; consumption/reinstatement run inside the existing transactions with
+  the credit rows locked `FOR UPDATE` in **ascending id** order (lock order: contract → invoices → payments →
+  credits). Deleting/editing reinstates every application's amount (never above the credit's value).
+  Errors: unknown/other customer's credit → 400 "Crédito não encontrado."; repeated id / bad amount / amount
+  above the balance / sum above the total → 400.
+- **Legacy columns** `contracts.credit_id/credit_applied` and `invoices.credit_id/credit_applied` are **still
+  in the schema but legacy**: `credit_applied` is kept = the TOTAL of the applications (so totals/documents
+  reading it keep working) and `credit_id` = the first credit (or null). Reads use `credit_applications`;
+  only a record with **no rows** but a legacy `credit_id` + `credit_applied > 0` (database not backfilled
+  yet) is read as one application (rows win when both exist: never double counted). `add-columns.ts`
+  creates the table and **backfills** (insert-only, idempotent: second run inserts 0) one row per such record.
+  Dropping the legacy columns is a **planned later, separate step** (after the backfill and a release).
 - The customer page lists credits (with "Mostrar utilizados") and all pending charges.
 
 ### Contract status workflow (one-time contracts)
@@ -292,7 +315,9 @@ The tag reference shown on the *Modelos* page (`FIELD_GROUPS_BY_KIND` in `client
 **must mirror** the data objects built in `server/src/routes/contracts.ts` and `receipts.ts`.
 Whenever a tag is added/changed on the server, update that page. Notable tags: customer fields;
 `{total}` (already net of credit), `{total_before_credit}`, `{subtotal}`, `{discount_total}`,
-`{has_discount}`, `{credit_used}/{credit_applied}/{credit_description}/{total_after_credit}`,
+`{has_discount}`, `{credit_used}/{credit_applied}/{credit_description}/{total_after_credit}` (with several credits
+`{credit_description}` joins the descriptions with ", ", `{credit_applied}` is the negative total) and the loop
+`{#credits}` (`{credit_description}`, `{credit_amount}` = that credit's amount, **positive**),
 `{date}`/`{date_long}` (long) and `{date_short}` (dd/MM/yyyy); loops `{#items}` (with `{item_number}`,
 `{base_total}` = base price × quantity without additionals, `{line_total}` with additionals),
 `{#items_summary}` (same service **and** same additionals grouped, quantity + summed total),

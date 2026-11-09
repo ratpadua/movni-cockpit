@@ -33,6 +33,7 @@ import DateField from '../components/DateField';
 import { downloadFile, generateReceipt } from '../lib/download';
 import { paymentSituation } from '../lib/paymentStatus';
 import { MONEY_INPUT_BRL } from '../lib/money';
+import CreditPicker, { CreditSelection, creditsPayload, creditsTotal, selectionFromApplied, validateCredits } from '../components/CreditPicker';
 import PaymentFormModal from '../components/PaymentFormModal';
 import ContractFormModal from '../components/ContractFormModal';
 import { addBusinessDaysIso, todayIso, formatBr } from '../lib/dates';
@@ -162,7 +163,8 @@ export default function ContractDetail() {
   const [invSelected, setInvSelected] = useState<number[]>([]);
   const [invDiscPct, setInvDiscPct] = useState<number | string>(0);
   const [invMods, setInvMods] = useState<{ name: string; price: number | string; disc: number | string }[]>([]);
-  const [invCreditId, setInvCreditId] = useState<string | null>(null);
+  // Credits ticked for the fatura (creditId -> amount to use).
+  const [invCreditSel, setInvCreditSel] = useState<CreditSelection>({});
   // Description for the credit created when a fatura comes out negative.
   const [invCreditDesc, setInvCreditDesc] = useState('');
   const [invPlan, setInvPlan] = useState<InstallmentValue>({ count: 1, dueDates: [] });
@@ -175,7 +177,7 @@ export default function ContractDetail() {
     setInvSelected([]);
     setInvDiscPct(0);
     setInvMods([]);
-    setInvCreditId(null);
+    setInvCreditSel({});
     setInvCreditDesc('');
     setInvPlan({ count: 1, dueDates: [addBusinessDaysIso(todayIso(), 5)] });
     setInvOpen(true);
@@ -188,7 +190,7 @@ export default function ContractDetail() {
     setInvSelected(c.items.filter((it) => it.invoiceId === inv.id).map((it) => it.id));
     setInvDiscPct(Number(inv.discountPercent) || 0);
     setInvMods(inv.modifiers.map((m) => ({ name: m.name, price: Number(m.price), disc: Number(m.discountPercent) })));
-    setInvCreditId(inv.creditId ? String(inv.creditId) : null);
+    setInvCreditSel(selectionFromApplied(inv.credits));
     setInvCreditDesc('');
     const dueDates = inv.payments
       .filter((p) => p.dueDate)
@@ -201,15 +203,25 @@ export default function ContractDetail() {
     setInvOpen(true);
   };
   // Load ALL credits (?all=1): a credit this invoice consumed completely has remaining 0 and
-  // would otherwise be missing from the edit modal. Fully used credits are then filtered
-  // out below, except the one already applied to the invoice being edited.
+  // would otherwise be missing from the edit modal. The CreditPicker hides fully used credits,
+  // except the ones already applied to the invoice being edited.
   const { data: allCredits = [] } = useQuery({
     queryKey: ['/customers', c?.customerId, 'credits', 'all'],
     queryFn: () => api.get<CustomerCredit[]>(`/customers/${c!.customerId}/credits?all=1`),
     enabled: invOpen && !!c?.customerId,
   });
-  const appliedCreditId = invEditId ? c?.invoices.find((v) => v.id === invEditId)?.creditId ?? null : null;
-  const custCredits = allCredits.filter((cr) => Number(cr.remaining) > 0 || cr.id === appliedCreditId);
+  const invApplied = invEditId ? c?.invoices.find((v) => v.id === invEditId)?.credits ?? [] : [];
+  // Net value of the fatura being composed (mirrors the server: items, discount %, modifiers).
+  // A negative fatura applies no credit (its surplus becomes a new credit instead).
+  const invRawFinal = (() => {
+    const base = invEditId
+      ? [...(c?.items.filter((it) => !it.invoiceId) ?? []), ...(c?.items.filter((it) => it.invoiceId === invEditId) ?? [])]
+      : c?.items.filter((it) => !it.invoiceId) ?? [];
+    const subtotal = base.filter((it) => invSelected.includes(it.id)).reduce((s, it) => s + Number(it.lineTotal), 0);
+    const modsSum = invMods.reduce((s, m) => s + (Number(m.price) || 0) * (1 - (Number(m.disc) || 0) / 100), 0);
+    return subtotal * (1 - (Number(invDiscPct) || 0) / 100) + modsSum;
+  })();
+  const invCreditCheck = validateCredits(invCreditSel, allCredits, invApplied, Math.max(0, invRawFinal));
   const saveInvoice = useMutation({
     mutationFn: () => {
       const body = {
@@ -220,7 +232,7 @@ export default function ContractDetail() {
         modifiers: invMods
           .filter((m) => m.name)
           .map((m) => ({ name: m.name, price: Number(m.price) || 0, discountPercent: Number(m.disc) || 0 })),
-        creditId: invCreditId ? Number(invCreditId) : null,
+        credits: invRawFinal < 0 ? [] : creditsPayload(invCreditSel),
         creditDescription: invCreditDesc,
         installments: invPlan.count,
         dueDates: invPlan.dueDates,
@@ -240,7 +252,10 @@ export default function ContractDetail() {
   });
   const deleteInvoice = useMutation({
     mutationFn: (invId: number) => api.del(`/invoices/${invId}`),
-    onSuccess: invalidate,
+    onSuccess: () => {
+      invalidate();
+      qc.invalidateQueries({ queryKey: ['/customers'] }); // credits balances changed
+    },
     onError: err,
   });
   const genInvoice = useMutation({
@@ -387,6 +402,12 @@ export default function ContractDetail() {
             </Group>
             <Text c="dimmed">{c.customer?.name ?? 'Sem cliente'}</Text>
             {c.comments && <Text size="sm" mt={4}>{c.comments}</Text>}
+            {c.type === 'contract' && (c.credits?.length ?? 0) > 0 && (
+              <Text size="sm" c="dimmed" mt={4}>
+                Créditos aplicados (-{brl(Number(c.creditApplied ?? 0))}):{' '}
+                {c.credits!.map((cr) => `${cr.description} — ${brl(cr.amount)}`).join('; ')}
+              </Text>
+            )}
           </div>
           <Group>
             <Text fw={700}>{brl(Number(c.total))}</Text>
@@ -576,7 +597,11 @@ export default function ContractDetail() {
                         {new Date(inv.createdAt).toLocaleDateString('pt-BR')}
                         {inv.installments > 1 ? ` · ${inv.installments}x` : ''}
                         {Number(inv.discountPercent) > 0 ? ` · desc. ${Number(inv.discountPercent)}%` : ''}
-                        {Number(inv.creditApplied) > 0 ? ` · crédito -${brl(Number(inv.creditApplied))}` : ''}
+                        {Number(inv.creditApplied) > 0
+                          ? ` · crédito -${brl(Number(inv.creditApplied))}${
+                              inv.credits?.length ? ` (${inv.credits.map((cr) => `${cr.description}: ${brl(cr.amount)}`).join('; ')})` : ''
+                            }`
+                          : ''}
                         {inv.comments ? ` · ${inv.comments}` : ''}
                       </Text>
                     </div>
@@ -724,14 +749,9 @@ export default function ContractDetail() {
             const negative = rawFinal < 0;
             const surplus = negative ? -rawFinal : 0;
             const final = Math.max(0, rawFinal);
-            const selCredit = negative ? undefined : custCredits.find((cr) => String(cr.id) === invCreditId);
-            // When editing, the amount this invoice already applied is reinstated
-            // server-side before re-applying, so preview it as available again.
-            const editingInv = invEditId ? c.invoices.find((v) => v.id === invEditId) : undefined;
-            const reinstated =
-              selCredit && editingInv && editingInv.creditId === selCredit.id ? Number(editingInv.creditApplied ?? 0) : 0;
-            const selRemaining = selCredit ? Number(selCredit.remaining) + reinstated : 0;
-            const creditApplied = selCredit ? Math.min(selRemaining, final) : 0;
+            // Credits (one editable amount each); the picker previews what this fatura already
+            // consumed as available again (the server reinstates it before re-applying).
+            const creditApplied = negative ? 0 : creditsTotal(invCreditSel);
             const afterCredit = Math.max(0, final - creditApplied);
             return (
               <>
@@ -757,28 +777,18 @@ export default function ContractDetail() {
                     />
                   </Alert>
                 ) : (
-                  custCredits.length > 0 && (
-                    <Select
-                      label="Usar crédito do cliente"
-                      placeholder="Nenhum"
-                      clearable
-                      searchable
-                      data={custCredits.map((cr) => ({
-                        value: String(cr.id),
-                        label: `${cr.description} — restante ${brl(
-                          Number(cr.remaining) + (editingInv && editingInv.creditId === cr.id ? Number(editingInv.creditApplied ?? 0) : 0)
-                        )}`,
-                      }))}
-                      value={invCreditId}
-                      onChange={setInvCreditId}
-                    />
-                  )
+                  <CreditPicker
+                    credits={allCredits}
+                    applied={invApplied}
+                    total={final}
+                    value={invCreditSel}
+                    onChange={setInvCreditSel}
+                  />
                 )}
                 <Text size="sm" c="dimmed" ta="right">
                   Subtotal: {brl(subtotal)}
                   {modsSum ? ` · Modificadores: ${brl(modsSum)}` : ''} · Total: {brl(final)}
                   {negative ? ` · Crédito gerado: ${brl(surplus)}` : ''}
-                  {creditApplied ? ` · Crédito: -${brl(creditApplied)} · A parcelar: ${brl(afterCredit)}` : ''}
                 </Text>
                 <Divider label="Parcelamento" />
                 <InstallmentPlanner amount={afterCredit} value={invPlan} onChange={setInvPlan} />
@@ -788,7 +798,7 @@ export default function ContractDetail() {
                   </Button>
                   <Button
                     loading={saveInvoice.isPending}
-                    disabled={invSelected.length === 0 || (negative && !!invEditId)}
+                    disabled={invSelected.length === 0 || (negative && !!invEditId) || (!negative && !invCreditCheck.ok)}
                     onClick={() => saveInvoice.mutate()}
                   >
                     {invEditId ? 'Salvar alterações' : 'Criar fatura'}

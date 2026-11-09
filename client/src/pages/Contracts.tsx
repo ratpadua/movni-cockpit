@@ -97,7 +97,7 @@ export default function Contracts() {
 
   const remove = useMutation({
     mutationFn: (id: number) => api.del(`/contracts/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['/contracts'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['/contracts'] }); qc.invalidateQueries({ queryKey: ['/customers'] }); },
     onError: (e: Error) => notifications.show({ message: e.message, color: 'red' }),
   });
 

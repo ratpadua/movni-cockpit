@@ -51,6 +51,12 @@ export interface Customer {
   document?: string | null;
 }
 
+export interface AppliedCredit {
+  creditId: number;
+  description: string;
+  amount: number;
+}
+
 export interface CustomerCredit {
   id: number;
   customerId: number;
@@ -253,7 +259,8 @@ export interface Invoice {
   refNumber?: string | null;
   comments?: string | null;
   creditId?: number | null;
-  creditApplied?: string;
+  creditApplied?: string; // TOTAL of `credits`
+  credits?: AppliedCredit[];
   discountPercent: string;
   installments: number;
   total: string;
@@ -288,7 +295,8 @@ export interface ContractDetail {
   duration?: string | null;
   quantity?: number | null;
   creditId?: number | null;
-  creditApplied?: string;
+  creditApplied?: string; // TOTAL of `credits`
+  credits?: AppliedCredit[];
   status: ContractStatus;
   statusChangedAt: string;
   total: string;

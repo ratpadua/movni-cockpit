@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import { createRequire } from 'node:module';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -114,7 +115,7 @@ const created = { customers: [], categories: [], services: [], templates: [], co
 let sql = null;
 let baseline = null;
 let origSettings = null;
-const TABLES = ['customers', 'customer_credits', 'services', 'service_versions', 'service_additionals', 'contracts', 'contract_items', 'contract_documents', 'invoices', 'payments', 'categories', 'templates', 'bank_imports', 'transactions'];
+const TABLES = ['customers', 'customer_credits', 'credit_applications', 'services', 'service_versions', 'service_additionals', 'contracts', 'contract_items', 'contract_documents', 'invoices', 'payments', 'categories', 'templates', 'bank_imports', 'transactions'];
 async function counts() {
   const o = {};
   for (const t of TABLES) { const [r] = await sql.query(`select count(*) c from \`${t}\``); o[t] = Number(r[0].c); }
@@ -1162,6 +1163,311 @@ async function main() {
   ok('empty items unchanged (no 5xx)', r.status < 500, `${r.status} ${short(r.body)}`); keep([r]);
   await sql.query("delete from payments where description like 'QAZ-Q%'");
 
+  // ====================================================================
+  sec('R. Multiple credits per contract / fatura (credit_applications)');
+  {
+  const sR = (await api('POST', '/api/services', { name: 'QAZ-R Servico', basePrice: '1000' })).body; created.services.push(sR.id);
+  const svR = sR.currentVersion.id;
+  const cbR = (cid, extra = {}) => ({ customerId: cid, type: 'contract', items: [{ serviceVersionId: svR }], templateId: tC, receiptTemplateId: tR, ...extra });
+  const mkCr = async (cid, v, d) => (await api('POST', `/api/customers/${cid}/credits`, { description: d, value: String(v) })).body;
+  const remOf = async (cid, id) => Number((await credOf(cid, id)).remaining);
+  const appRows = async (where, p) => (await sql.query(`select credit_id c, amount a, contract_id k, invoice_id i from credit_applications where ${where} order by id`, p))[0];
+  // every credit of a customer must satisfy: remaining == value - sum(applications) and 0 <= remaining <= value
+  const balanced = async (cid) => {
+    const rowsC = (await sql.query('select c.id, c.value v, c.remaining r, coalesce((select sum(a.amount) from credit_applications a where a.credit_id = c.id), 0) s from customer_credits c where c.customer_id = ?', [cid]))[0];
+    return rowsC.every((x) => Math.abs(Number(x.v) - Number(x.s) - Number(x.r)) < 0.011 && Number(x.r) >= -0.001 && Number(x.r) <= Number(x.v) + 0.001) ? '' : JSON.stringify(rowsC);
+  };
+  const tabsR = ['contracts', 'contract_items', 'payments', 'invoices', 'customer_credits', 'credit_applications'];
+  const snapR = async () => JSON.stringify(await Promise.all(tabsR.map((t) => cnt(t))));
+
+  // ---- R1. one-time contract with 3 credits, partial amounts ----
+  const cM = await mkCust('QAZ-R Cliente multi');
+  const k1 = await mkCr(cM.id, 100, 'QAZ-R cred A'), k2 = await mkCr(cM.id, 250, 'QAZ-R cred B'), k3 = await mkCr(cM.id, 80, 'QAZ-R cred C');
+  r = await api('POST', '/api/contracts', cbR(cM.id, { credits: [{ creditId: k1.id, amount: 60 }, { creditId: k2.id, amount: 250 }, { creditId: k3.id, amount: 40 }], installments: 3, dueDates: ['2027-01-10', '2027-02-10', '2027-03-10'] }));
+  eq('contract with 3 credits -> 201', r.status, 201);
+  const M1 = r.body; created.contracts.push(M1.id); payIds(M1.payments || []);
+  eq('creditApplied = exact total 350', Number(M1.creditApplied), 350);
+  ok('response lists the 3 credits with description and amount', Array.isArray(M1.credits) && M1.credits.length === 3 && M1.credits.every((c) => c.description && Number(c.amount) > 0) && Math.abs(M1.credits.reduce((s, c) => s + Number(c.amount), 0) - 350) < 0.001, short(M1.credits));
+  eq('balances: A 40, B 0, C 40', JSON.stringify([await remOf(cM.id, k1.id), await remOf(cM.id, k2.id), await remOf(cM.id, k3.id)]), JSON.stringify([40, 0, 40]));
+  const instR = (await sql.query('select amount from payments where contract_id = ? and installment_number is not null order by installment_number', [M1.id]))[0].map((x) => Number(x.amount));
+  ok('installments are computed on the NET total (1000 - 350 = 650), 3 rows', instR.length === 3 && Math.abs(instR.reduce((a, b) => a + b, 0) - 650) < 0.011, short(instR));
+  eq('credit_applications rows: 3, amounts 60/250/40', JSON.stringify((await appRows('contract_id = ?', [M1.id])).map((x) => Number(x.a))), JSON.stringify([60, 250, 40]));
+  const leg = (await sql.query('select credit_id c, credit_applied a from contracts where id = ?', [M1.id]))[0][0];
+  ok('legacy columns kept: credit_applied = total 350, credit_id = first credit', Number(leg.a) === 350 && Number(leg.c) > 0, short(leg));
+  eq('GET contract returns the same credits', JSON.stringify((await api('GET', `/api/contracts/${M1.id}`)).body.credits.map((c) => [c.creditId, Number(c.amount)])), JSON.stringify(M1.credits.map((c) => [c.creditId, Number(c.amount)])));
+  eq('balanced credits after create', await balanced(cM.id), '');
+  r = await api('DELETE', `/api/customers/${cM.id}/credits/${k1.id}`);
+  ok('deleting a credit that has applications -> 409', r.status === 409, `${r.status} ${short(r.body)}`);
+  eq('legacy single creditId still accepted when "credits" is absent', (await api('POST', '/api/contracts', cbR(cM.id, { creditId: k1.id, installments: 1, dueDates: ['2027-01-10'] }))).status, 201);
+  { const l = (await sql.query('select id from contracts where customer_id = ? and id <> ? order by id desc limit 1', [cM.id, M1.id]))[0][0]; created.contracts.push(l.id); payIds((await sql.query('select id from payments where contract_id = ?', [l.id]))[0]); await api('DELETE', `/api/contracts/${l.id}`); }
+  eq('...and its credit is reinstated when that contract is deleted (balanced, A back at 40)', (await balanced(cM.id)) === '' && (await remOf(cM.id, k1.id)) === 40, true);
+
+  // ---- R2. every 400 ----
+  const cE = await mkCust('QAZ-R Cliente erros'); const cE2 = await mkCust('QAZ-R Cliente erros 2');
+  const e1 = await mkCr(cE.id, 100, 'QAZ-R erro A'), e2 = await mkCr(cE.id, 5000, 'QAZ-R erro grande'), eOther = await mkCr(cE2.id, 100, 'QAZ-R outro cliente');
+  const snapE = async () => JSON.stringify([await snapR(), await remOf(cE.id, e1.id), await remOf(cE.id, e2.id)]);
+  for (const [label, credits, re, customer] of [
+    ['credits not a list', 'x', /Lista de créditos inválida\./],
+    ['an entry without creditId', [{ amount: 5 }], /Crédito inválido\./],
+    ['a non-numeric creditId', [{ creditId: 'abc', amount: 5 }], /Crédito inválido\./],
+    ['the same credit twice', [{ creditId: e1.id, amount: 5 }, { creditId: e1.id, amount: 5 }], /Crédito repetido na lista\./],
+    ['amount 0', [{ creditId: e1.id, amount: 0 }], /Valor de crédito inválido: informe um valor maior que zero\./],
+    ['negative amount', [{ creditId: e1.id, amount: -5 }], /Valor de crédito inválido: informe um valor maior que zero\./],
+    ['non-numeric amount', [{ creditId: e1.id, amount: 'abc' }], /Valor de crédito inválido: informe um valor maior que zero\./],
+    ['amount above the credit balance', [{ creditId: e1.id, amount: 100.01 }], /Saldo insuficiente no crédito "QAZ-R erro A" \(disponível R\$/],
+    ['total above the contract value', [{ creditId: e2.id, amount: 1000.01 }], /O total dos créditos excede o valor do contrato\./],
+    ['unknown credit', [{ creditId: 2000000000, amount: 5 }], /Crédito não encontrado\./],
+    ["another customer's credit", [{ creditId: eOther.id, amount: 5 }], /Crédito não encontrado\./],
+  ]) {
+    const s0 = await snapE();
+    r = await api('POST', '/api/contracts', cbR(cE.id, { credits, installments: 1, dueDates: ['2027-01-10'] }));
+    ok(`POST contract with ${label} -> 400 pt-BR`, r.status === 400 && re.test(r.body?.error || ''), `${r.status} ${short(r.body)}`);
+    eq(`...nothing written (${label})`, await snapE(), s0);
+  }
+  r = await api('POST', '/api/contracts', { ...cbR(cE.id, { credits: [{ creditId: e1.id, amount: 5 }] }), customerId: undefined });
+  ok('credits but no customer -> 400 "Crédito não encontrado."', r.status === 400 && /Crédito não encontrado\./.test(r.body?.error || ''), `${r.status} ${short(r.body)}`);
+
+  // ---- R3. contract edit before / after a receipt ----
+  const sums = async (id) => Number((await sql.query('select coalesce(sum(amount),0) s from payments where contract_id = ? and installment_number is not null', [id]))[0][0].s);
+  r = await api('PUT', `/api/contracts/${M1.id}`, { comments: 'QAZ-R so cabecalho' });
+  ok('header-only PUT (credits omitted) keeps the credits', r.status === 200 && Number(r.body.creditApplied) === 350 && r.body.credits.length === 3, `${r.status} ${short(r.body.credits)}`);
+  r = await api('PUT', `/api/contracts/${M1.id}`, { credits: M1.credits.map((c) => ({ creditId: c.creditId, amount: Number(c.amount) })) });
+  ok('PUT with ONLY credits (same list, no other field) -> 200 (APP BUG if 500: "No values to set")', r.status === 200, `${r.status} ${short(r.body)}`);
+  const snapHdr = async () => JSON.stringify([(await sql.query('select amount, date_format(due_date, "%Y-%m-%d") d, installment_number n from payments where contract_id = ? order by id', [M1.id]))[0], (await sql.query('select comments, title, installments, credit_applied from contracts where id = ?', [M1.id]))[0][0], await appRows('contract_id = ?', [M1.id])]);
+  eq('credits-only PUT regenerates installments consistently (rows == stored count)', (await cnt('payments', 'contract_id = ? and installment_number is not null', [M1.id])), Number(r.body?.installments));
+  { const h0 = await snapHdr();
+    r = await api('PUT', `/api/contracts/${M1.id}`, {});
+    ok('PUT {} (empty body) -> 200 and a pure no-op', r.status === 200 && (await snapHdr()) === h0, `${r.status} ${short(r.body)}`);
+    r = await api('PUT', `/api/contracts/${M1.id}`, { installments: 2 });
+    ok('PUT {installments} only (before any receipt) -> 200, re-split into 2 rows on the net total', r.status === 200 && (await cnt('payments', 'contract_id = ? and installment_number is not null', [M1.id])) === 2 && Math.abs((await sums(M1.id)) - (1000 - Number(r.body.creditApplied))) < 0.011, `${r.status} ${short(r.body)}`);
+    r = await api('PUT', `/api/contracts/${M1.id}`, { dueDates: ['2027-06-10', '2027-07-10'] });
+    ok('PUT {dueDates} only -> 200 and the new due dates are stored', r.status === 200 && JSON.stringify((await sql.query("select date_format(due_date, '%Y-%m-%d') d from payments where contract_id = ? and installment_number is not null order by installment_number", [M1.id]))[0].map((x) => x.d)) === JSON.stringify(['2027-06-10', '2027-07-10']), `${r.status} ${short(r.body)}`);
+    r = await api('PUT', `/api/contracts/${M1.id}`, { installments: 3, dueDates: ['2027-01-10', '2027-02-10', '2027-03-10'] });
+    eq('PUT {installments, dueDates} only -> 200 (back to 3 rows)', r.status === 200 && (await cnt('payments', 'contract_id = ? and installment_number is not null', [M1.id])) === 3, true); }
+  r = await api('PUT', `/api/contracts/${M1.id}`, { comments: 'QAZ-R c', credits: [{ creditId: k1.id, amount: 100 }, { creditId: k3.id, amount: 20 }] });
+  ok('PUT replaces the list: 2 credits, total 120', r.status === 200 && Number(r.body.creditApplied) === 120 && r.body.credits.length === 2, `${r.status} ${short(r.body)}`);
+  eq('old applications reinstated, new ones applied: A 0, B 250, C 60', JSON.stringify([await remOf(cM.id, k1.id), await remOf(cM.id, k2.id), await remOf(cM.id, k3.id)]), JSON.stringify([0, 250, 60]));
+  ok('installments re-split on the new net total (1000 - 120 = 880)', Math.abs((await sums(M1.id)) - 880) < 0.011, String(await sums(M1.id)));
+  eq('balanced after replace', await balanced(cM.id), '');
+  r = await api('PUT', `/api/contracts/${M1.id}`, { comments: 'QAZ-R c', credits: [{ creditId: k1.id, amount: 70 }] });
+  ok('same credit in old and new list with another amount (100 -> 70): A 30', r.status === 200 && (await remOf(cM.id, k1.id)) === 30, `${r.status}`);
+  r = await api('PUT', `/api/contracts/${M1.id}`, { items: [{ serviceVersionId: svR }], modifiers: [{ name: 'QAZ-R tudo', price: -990, discountPercent: 0 }] });
+  ok('total below the applied credit (keep case) -> 400 pt-BR', r.status === 400 && /O valor do contrato ficou menor que o crédito aplicado\./.test(r.body?.error || ''), `${r.status} ${short(r.body)}`);
+  r = await api('PUT', `/api/contracts/${M1.id}`, { comments: 'QAZ-R c', credits: [{ creditId: k2.id, amount: 250 }, { creditId: k3.id, amount: 81 }] });
+  ok('PUT with an amount above the balance -> 400 "Saldo insuficiente"', r.status === 400 && /Saldo insuficiente/.test(r.body?.error || ''), `${r.status} ${short(r.body)}`);
+  eq('failed PUT changed nothing (A still 30)', await remOf(cM.id, k1.id), 30);
+  r = await api('PUT', `/api/contracts/${M1.id}`, { comments: 'QAZ-R c', credits: [] });
+  ok('PUT credits [] clears them (applied 0, all balances back to value)', r.status === 200 && Number(r.body.creditApplied) === 0 && (r.body.credits || []).length === 0 && JSON.stringify([await remOf(cM.id, k1.id), await remOf(cM.id, k2.id), await remOf(cM.id, k3.id)]) === JSON.stringify([100, 250, 80]), `${r.status} ${short(r.body)}`);
+  eq('...installments back to the gross 1000', Math.round(await sums(M1.id)), 1000);
+  r = await api('PUT', `/api/contracts/${M1.id}`, { comments: 'QAZ-R c', credits: [{ creditId: k2.id, amount: 200 }, { creditId: k3.id, amount: 30 }] });
+  eq('re-apply 2 credits -> 200', r.status, 200);
+  const inst1 = (await sql.query('select id from payments where contract_id = ? and installment_number = 1', [M1.id]))[0][0].id;
+  await api('PUT', `/api/payments/${inst1}`, { receiptStatus: 'received', receivedDate: '2027-01-10' });
+  const snapM = async () => JSON.stringify([await appRows('contract_id = ?', [M1.id]), await remOf(cM.id, k2.id), await sums(M1.id)]);
+  const m0 = await snapM();
+  for (const [label, body] of [['replace credits', { credits: [{ creditId: k1.id, amount: 10 }] }], ['clear credits ([])', { credits: [] }]]) {
+    r = await api('PUT', `/api/contracts/${M1.id}`, body);
+    ok(`after a received payment: PUT ${label} -> 409`, r.status === 409, `${r.status} ${short(r.body)}`);
+  }
+  eq('409s changed nothing', await snapM(), m0);
+  r = await api('PUT', `/api/contracts/${M1.id}`, { comments: 'QAZ-R depois do recibo' });
+  ok('header-only edit after a receipt is still OK and keeps the credits', r.status === 200 && r.body.credits.length === 2, `${r.status}`);
+  r = await api('DELETE', `/api/contracts/${M1.id}`); eq('delete blocked while a payment is received (409)', r.status, 409);
+  await api('PUT', `/api/payments/${inst1}`, { receiptStatus: 'open', receivedDate: null });
+  r = await api('DELETE', `/api/contracts/${M1.id}`); eq('re-opened: contract deletes (204)', r.status, 204);
+  eq('every credit reinstated EXACTLY (100/250/80, never above)', JSON.stringify([await remOf(cM.id, k1.id), await remOf(cM.id, k2.id), await remOf(cM.id, k3.id)]), JSON.stringify([100, 250, 80]));
+  eq('credit_applications rows of the contract are gone', (await appRows('contract_id = ?', [M1.id])).length, 0);
+  // type change contract -> invoice reinstates and clears
+  r = await api('POST', '/api/contracts', cbR(cM.id, { credits: [{ creditId: k1.id, amount: 100 }, { creditId: k2.id, amount: 50 }], installments: 1, dueDates: ['2027-01-10'] }));
+  const M2 = r.body; created.contracts.push(M2.id); payIds(M2.payments || []);
+  r = await api('PUT', `/api/contracts/${M2.id}`, { type: 'invoice', invoiceTemplateId: tI });
+  ok('type change contract -> invoice -> 200, credits cleared', r.status === 200 && Number(r.body.creditApplied || 0) === 0 && (r.body.credits || []).length === 0, `${r.status} ${short(r.body)}`);
+  eq('...and the credits are reinstated (100/250)', JSON.stringify([await remOf(cM.id, k1.id), await remOf(cM.id, k2.id)]), JSON.stringify([100, 250]));
+  eq('...no application rows remain', (await appRows('contract_id = ?', [M2.id])).length, 0);
+  r = await api('POST', '/api/contracts', { customerId: cM.id, type: 'invoice', title: 'QAZ-R rec ignora', invoiceTemplateId: tI, receiptTemplateId: tR, credits: [{ creditId: k1.id, amount: 10 }] });
+  ok('recurring contract ignores "credits" (no application, balance untouched)', r.status === 201 && (await remOf(cM.id, k1.id)) === 100 && (await appRows('contract_id = ?', [r.body.id])).length === 0, `${r.status}`); if (r.status === 201) created.contracts.push(r.body.id);
+
+  // ---- R4. faturas ----
+  const cF = await mkCust('QAZ-R Cliente fatura');
+  const f1 = await mkCr(cF.id, 300, 'QAZ-R fat A'), f2 = await mkCr(cF.id, 200, 'QAZ-R fat B'), f3 = await mkCr(cF.id, 120, 'QAZ-R fat C');
+  const RF = await mkRec(cF.id);
+  const itF = (await (async () => { await api('POST', `/api/contracts/${RF.id}/items`, { serviceVersionId: svR, items: Array.from({ length: 6 }, (_, i) => ({ description: `QAZ-R item ${i}` })), performedAt: '2026-10-05' }); return (await api('GET', `/api/contracts/${RF.id}`)).body.items.filter((i) => !i.invoiceId).map((i) => i.id); })());
+  const invCredits = async (iid) => (await api('GET', `/api/contracts/${RF.id}`)).body.invoices.find((i) => i.id === iid);
+  r = await api('POST', `/api/contracts/${RF.id}/invoices`, { itemIds: [itF[0]], reference: 'QAZ-R fatura 1', credits: [{ creditId: f1.id, amount: 300 }, { creditId: f2.id, amount: 150 }], installments: 2, dueDates: ['2027-01-10', '2027-02-10'] });
+  eq('fatura with 2 credits -> 201', r.status, 201);
+  let F1 = await invCredits((await sql.query("select id from invoices where reference = 'QAZ-R fatura 1'"))[0][0].id);
+  ok('fatura lists the credits, creditApplied 450', Number(F1.creditApplied) === 450 && F1.credits.length === 2, short(F1));
+  eq('balances: fat A 0 (fully consumed), fat B 50', JSON.stringify([await remOf(cF.id, f1.id), await remOf(cF.id, f2.id)]), JSON.stringify([0, 50]));
+  const instF = async (iid) => Number((await sql.query('select coalesce(sum(amount),0) s from payments where invoice_id = ?', [iid]))[0][0].s);
+  ok('fatura installments sum = 1000 - 450 = 550', Math.abs((await instF(F1.id)) - 550) < 0.011, String(await instF(F1.id)));
+  payIds((await sql.query('select id from payments where invoice_id = ?', [F1.id]))[0]);
+  // edit a fatura whose credit A is FULLY consumed by itself: same credit in old and new list
+  r = await api('PUT', `/api/invoices/${F1.id}`, { reference: 'QAZ-R fatura 1', itemIds: [itF[0]], credits: [{ creditId: f1.id, amount: 300 }, { creditId: f2.id, amount: 200 }, { creditId: f3.id, amount: 100 }], installments: 2, dueDates: ['2027-01-10', '2027-02-10'] });
+  ok('edit: keep fully-consumed A (300), raise B to 200, add C 100 -> 200', r.status === 200, `${r.status} ${short(r.body)}`);
+  eq('balances: A 0, B 0, C 20', JSON.stringify([await remOf(cF.id, f1.id), await remOf(cF.id, f2.id), await remOf(cF.id, f3.id)]), JSON.stringify([0, 0, 20]));
+  ok('installments re-split on 1000 - 600 = 400', Math.abs((await instF(F1.id)) - 400) < 0.011, String(await instF(F1.id)));
+  r = await api('PUT', `/api/invoices/${F1.id}`, { reference: 'QAZ-R fatura 1', itemIds: [itF[0]], credits: [{ creditId: f2.id, amount: 80 }], installments: 1, dueDates: ['2027-01-10'] });
+  ok('edit: remove A and C, lower B to 80', r.status === 200 && JSON.stringify([await remOf(cF.id, f1.id), await remOf(cF.id, f2.id), await remOf(cF.id, f3.id)]) === JSON.stringify([300, 120, 120]), `${r.status}`);
+  eq('balanced after fatura edits', await balanced(cF.id), '');
+  r = await api('PUT', `/api/invoices/${F1.id}`, { reference: 'QAZ-R fatura 1', itemIds: [itF[0]], credits: [{ creditId: f1.id, amount: 300 }, { creditId: f3.id, amount: 120 }], installments: 1, dueDates: ['2027-01-10'] });
+  eq('edit with other credits -> 200', r.status, 200);
+  const sF = async () => JSON.stringify([await appRows('invoice_id = ?', [F1.id]), await balanced(cF.id), await instF(F1.id)]);
+  const fs0 = await sF();
+  for (const [label, credits, re] of [
+    ['total above the fatura value', [{ creditId: f1.id, amount: 300 }, { creditId: f2.id, amount: 200 }, { creditId: f3.id, amount: 120 }, { creditId: (await mkCr(cF.id, 500, 'QAZ-R fat D')).id, amount: 500 }], /O total dos créditos excede o valor da fatura\./],
+    ['amount above the balance', [{ creditId: f3.id, amount: 120.01 }], /Saldo insuficiente no crédito "QAZ-R fat C"/],
+    ['duplicate credit', [{ creditId: f3.id, amount: 1 }, { creditId: f3.id, amount: 1 }], /Crédito repetido na lista\./],
+    ['unknown credit', [{ creditId: 2000000000, amount: 1 }], /Crédito não encontrado\./],
+    ['invalid list', 'x', /Lista de créditos inválida\./],
+    ['zero amount', [{ creditId: f3.id, amount: 0 }], /Valor de crédito inválido/],
+  ]) {
+    r = await api('PUT', `/api/invoices/${F1.id}`, { reference: 'QAZ-R fatura 1', itemIds: [itF[0]], credits, installments: 1, dueDates: ['2027-01-10'] });
+    ok(`PUT fatura with ${label} -> 400`, r.status === 400 && re.test(r.body?.error || ''), `${r.status} ${short(r.body)}`);
+    eq(`...nothing changed (${label})`, await sF(), fs0);
+  }
+  r = await api('POST', `/api/contracts/${RF.id}/invoices`, { itemIds: [itF[1]], reference: 'QAZ-R excede', credits: [{ creditId: f2.id, amount: 100 }, { creditId: f1.id, amount: 100 }, { creditId: f3.id, amount: 100 }].concat([{ creditId: (await sql.query("select id from customer_credits where description = 'QAZ-R fat D'"))[0][0].id, amount: 800 }]), installments: 1, dueDates: ['2027-01-10'] });
+  ok('POST fatura with credits above its value -> 400 "...da fatura."', r.status === 400 && /excede o valor da fatura|Saldo insuficiente/.test(r.body?.error || ''), `${r.status} ${short(r.body)}`);
+  r = await api('POST', `/api/contracts/${RF.id}/invoices`, { itemIds: [itF[1]], reference: 'QAZ-R sem credito', credits: [{ creditId: 2000000000, amount: 1 }], installments: 1, dueDates: ['2027-01-10'] });
+  ok('POST fatura with an unknown credit -> 400', r.status === 400 && /Crédito não encontrado\./.test(r.body?.error || ''), `${r.status}`);
+  // received installment blocks edit/delete (unchanged rule) and credit changes
+  const pF = (await sql.query('select id from payments where invoice_id = ? order by id', [F1.id]))[0];
+  await api('PUT', `/api/payments/${pF[0].id}`, { receiptStatus: 'received', receivedDate: '2027-01-10' });
+  eq('fatura PUT with credits after a receipt -> 409', (await api('PUT', `/api/invoices/${F1.id}`, { reference: 'x', itemIds: [itF[0]], credits: [] })).status, 409);
+  eq('fatura DELETE after a receipt -> 409', (await api('DELETE', `/api/invoices/${F1.id}`)).status, 409);
+  eq('...nothing changed', await sF(), fs0);
+  await api('PUT', `/api/payments/${pF[0].id}`, { receiptStatus: 'open', receivedDate: null });
+  // concurrency on the same credits: simultaneous edits and deletes end consistent
+  const edA = { reference: 'QAZ-R fatura 1', itemIds: [itF[0]], credits: [{ creditId: f1.id, amount: 200 }, { creditId: f3.id, amount: 100 }], installments: 1, dueDates: ['2027-01-10'] };
+  const edB = { reference: 'QAZ-R fatura 1', itemIds: [itF[0]], credits: [{ creditId: f2.id, amount: 150 }, { creditId: f3.id, amount: 20 }], installments: 1, dueDates: ['2027-01-10'] };
+  for (let k = 0; k < 3; k++) {
+    const x = await Promise.all([api('PUT', `/api/invoices/${F1.id}`, edA), api('PUT', `/api/invoices/${F1.id}`, edB), api('PUT', `/api/invoices/${F1.id}`, edA)]);
+    ok(`simultaneous fatura edits #${k + 1}: no 5xx`, x.every((y) => y.status < 500), x.map((y) => y.status).join(','));
+    eq(`...balances consistent #${k + 1} (remaining == value - applications)`, await balanced(cF.id), '');
+  }
+  const dd = await Promise.all([api('DELETE', `/api/invoices/${F1.id}`), api('DELETE', `/api/invoices/${F1.id}`), api('PUT', `/api/invoices/${F1.id}`, edB)]);
+  ok('simultaneous delete/delete/edit of the fatura: no 5xx', dd.every((y) => y.status < 500), dd.map((y) => y.status).join(','));
+  eq('...balances consistent', await balanced(cF.id), '');
+  if ((await cnt('invoices', 'id = ?', [F1.id])) === 1) await api('DELETE', `/api/invoices/${F1.id}`);
+  eq('after deleting the fatura every credit is back at its value (300/200/120)', JSON.stringify([await remOf(cF.id, f1.id), await remOf(cF.id, f2.id), await remOf(cF.id, f3.id)]), JSON.stringify([300, 200, 120]));
+  // simultaneous contract edits touching the same credits
+  const cC = await mkCust('QAZ-R Cliente conc'); const q1 = await mkCr(cC.id, 400, 'QAZ-R conc A'), q2 = await mkCr(cC.id, 400, 'QAZ-R conc B');
+  const MC = (await api('POST', '/api/contracts', cbR(cC.id, { credits: [{ creditId: q1.id, amount: 100 }], installments: 1, dueDates: ['2027-01-10'] }))).body; created.contracts.push(MC.id); payIds(MC.payments || []);
+  for (let k = 0; k < 3; k++) {
+    const x = await Promise.all([api('PUT', `/api/contracts/${MC.id}`, { comments: 'QAZ-R c', credits: [{ creditId: q1.id, amount: 300 }] }), api('PUT', `/api/contracts/${MC.id}`, { comments: 'QAZ-R c', credits: [{ creditId: q2.id, amount: 200 }, { creditId: q1.id, amount: 50 }] }), api('DELETE', `/api/contracts/${MC.id}`)]);
+    ok(`simultaneous contract edit/edit/delete #${k + 1}: no 5xx`, x.every((y) => y.status < 500), x.map((y) => y.status).join(','));
+    eq(`...balances consistent #${k + 1}`, await balanced(cC.id), '');
+    if ((await cnt('contracts', 'id = ?', [MC.id])) === 0) break;
+  }
+  if ((await cnt('contracts', 'id = ?', [MC.id])) === 1) await api('DELETE', `/api/contracts/${MC.id}`);
+  eq('contract gone and credits back at 400/400', JSON.stringify([await remOf(cC.id, q1.id), await remOf(cC.id, q2.id)]), JSON.stringify([400, 400]));
+  // negative fatura: clamped to 0, surplus becomes a credit, no credit needed
+  r = await api('POST', `/api/contracts/${RF.id}/invoices`, { itemIds: [itF[2]], reference: 'QAZ-R negativa', modifiers: [{ name: 'QAZ-R desconto', price: -1300, discountPercent: 0 }], creditDescription: 'QAZ-R sobra', installments: 1, dueDates: ['2027-01-10'] });
+  const surplus = (await sql.query("select value v, remaining r from customer_credits where description = 'QAZ-R sobra'"))[0][0];
+  ok('negative fatura: created, surplus credit of 300 generated', r.status === 201 && surplus && Number(surplus.v) === 300 && Number(surplus.r) === 300, `${r.status} ${short(surplus)}`);
+  const negInv = (await sql.query("select id from invoices where reference = 'QAZ-R negativa'"))[0][0];
+  eq('negative fatura total is clamped to 0 (no payments)', await cnt('payments', 'invoice_id = ?', [negInv.id]), 0);
+  // delete fatura with 2 credits reinstates each once
+  r = await api('POST', `/api/contracts/${RF.id}/invoices`, { itemIds: [itF[3]], reference: 'QAZ-R apagar', credits: [{ creditId: f1.id, amount: 111 }, { creditId: f2.id, amount: 22.5 }], installments: 1, dueDates: ['2027-01-10'] });
+  eq('fatura to delete created', r.status, 201);
+  const fDel = (await sql.query("select id from invoices where reference = 'QAZ-R apagar'"))[0][0]; payIds((await sql.query('select id from payments where invoice_id = ?', [fDel.id]))[0]);
+  eq('balances 189 / 177.5', JSON.stringify([await remOf(cF.id, f1.id), await remOf(cF.id, f2.id)]), JSON.stringify([189, 177.5]));
+  eq('DELETE fatura -> 204', (await api('DELETE', `/api/invoices/${fDel.id}`)).status, 204);
+  eq('credits back at 300 / 200 exactly once', JSON.stringify([await remOf(cF.id, f1.id), await remOf(cF.id, f2.id)]), JSON.stringify([300, 200]));
+  eq('delete again -> not 5xx and no double reinstatement', ((await api('DELETE', `/api/invoices/${fDel.id}`)).status < 500) && (await remOf(cF.id, f1.id)) === 300, true);
+  eq('balanced at the end of the fatura tests', await balanced(cF.id), '');
+
+  // ---- R5. documents (docx AND odt; new and old tags) ----
+  const cD = await mkCust('QAZ-R Cliente docs'); const d1 = await mkCr(cD.id, 100, 'QAZ-R doc A'), d2 = await mkCr(cD.id, 250, 'QAZ-R doc B');
+  const NEW_PARAS = ['Total {total} Antes {total_before_credit} Credito {credit_applied} Desc [{credit_description}]', '{#credits}', 'Linha {credit_description} = {credit_amount}', '{/credits}', 'Fim'];
+  const OLD_PARAS = ['Total {total} Credito {credit_applied} Desc [{credit_description}]'];
+  const mkT = async (kind, name, fileName, buf) => { const x = await api('POST', '/api/templates', { kind, name, fileName, content: buf.toString('base64') }); if (x.status === 201) created.templates.push(x.body.id); return x.body.id; };
+  const tNd = await mkT('contract', 'QAZ-R novo docx', 'n.docx', buildDocx(NEW_PARAS)), tNo = await mkT('contract', 'QAZ-R novo odt', 'n.odt', buildOdt(NEW_PARAS)), tOd = await mkT('contract', 'QAZ-R antigo docx', 'o.docx', buildDocx(OLD_PARAS));
+  const tFd = await mkT('invoice', 'QAZ-R fat docx', 'f.docx', buildDocx(NEW_PARAS)), tFo = await mkT('invoice', 'QAZ-R fat odt', 'f.odt', buildOdt(NEW_PARAS));
+  const wantTxt = (t, before = true) => /Total R\$ 650,00/.test(t) && (!before || /Antes R\$ 1\.000,00/.test(t)) && /Credito -R\$ 350,00/.test(t) && /\[QAZ-R doc A, QAZ-R doc B\]/.test(t) && /Linha QAZ-R doc A = R\$ 100,00/.test(t) && /Linha QAZ-R doc B = R\$ 250,00/.test(t) && !/[{}]/.test(t) && !/-R\$ 100,00/.test(t.replace(/Credito -R\$ 350,00/, ''));
+  for (const [label, tid, fmt] of [['docx', tNd, 'docx'], ['odt', tNo, 'odt']]) {
+    const cc = (await api('POST', '/api/contracts', cbR(cD.id, { templateId: tid, credits: [{ creditId: d1.id, amount: 100 }, { creditId: d2.id, amount: 250 }], installments: 1, dueDates: ['2027-01-10'] }))).body;
+    created.contracts.push(cc.id); payIds(cc.payments || []);
+    const g = await api('POST', `/api/contracts/${cc.id}/generate`); eq(`generate contract ${label} 201`, g.status, 201); created.docs.push(g.body.id);
+    const dl = await api('GET', `/api/contract-documents/${g.body.id}/download`);
+    let t = ''; try { t = docText(dl.buf, fmt); } catch (e) { t = 'ERR ' + e.message; }
+    ok(`contract ${label}: {credit_applied} negative total, {credit_description} joined, {#credits} loop with positive amounts`, wantTxt(t), t.slice(0, 400));
+    await api('DELETE', `/api/contracts/${cc.id}`);
+  }
+  { const cc = (await api('POST', '/api/contracts', cbR(cD.id, { templateId: tOd, credits: [{ creditId: d1.id, amount: 100 }, { creditId: d2.id, amount: 250 }], installments: 1, dueDates: ['2027-01-10'] }))).body;
+    created.contracts.push(cc.id); payIds(cc.payments || []);
+    const g = await api('POST', `/api/contracts/${cc.id}/generate`); created.docs.push(g.body.id);
+    const t = docText((await api('GET', `/api/contract-documents/${g.body.id}/download`)).buf, 'docx');
+    ok('OLD template with only the single tags still renders (credit_applied -R$ 350,00, description list)', /Total R\$ 650,00/.test(t) && /Credito -R\$ 350,00/.test(t) && /\[QAZ-R doc A, QAZ-R doc B\]/.test(t), t.slice(0, 300));
+    await api('DELETE', `/api/contracts/${cc.id}`); }
+  eq('credits reinstated after the document contracts were deleted', JSON.stringify([await remOf(cD.id, d1.id), await remOf(cD.id, d2.id)]), JSON.stringify([100, 250]));
+  for (const [label, tid, fmt] of [['docx', tFd, 'docx'], ['odt', tFo, 'odt']]) {
+    const rec = (await api('POST', '/api/contracts', { customerId: cD.id, type: 'invoice', title: 'QAZ-R rec doc', invoiceTemplateId: tid, receiptTemplateId: tR })).body; created.contracts.push(rec.id);
+    await api('POST', `/api/contracts/${rec.id}/items`, { serviceVersionId: svR, items: [{ description: 'QAZ-R x' }], performedAt: '2026-10-05' });
+    const it = (await api('GET', `/api/contracts/${rec.id}`)).body.items[0].id;
+    await api('POST', `/api/contracts/${rec.id}/invoices`, { itemIds: [it], reference: 'QAZ-R fdoc', credits: [{ creditId: d1.id, amount: 100 }, { creditId: d2.id, amount: 250 }], installments: 1, dueDates: ['2027-01-10'] });
+    const fi = (await sql.query('select id from invoices where contract_id = ?', [rec.id]))[0][0]; payIds((await sql.query('select id from payments where invoice_id = ?', [fi.id]))[0]);
+    const g = await api('POST', `/api/invoices/${fi.id}/generate`); eq(`generate fatura ${label} 201`, g.status, 201); created.docs.push(g.body.id);
+    let t = ''; try { t = docText((await api('GET', `/api/contract-documents/${g.body.id}/download`)).buf, fmt); } catch (e) { t = 'ERR ' + e.message; }
+    ok(`fatura ${label}: {credit_applied}, {credit_description} and {#credits} loop`, wantTxt(t, false), t.slice(0, 400));
+    await api('DELETE', `/api/contracts/${rec.id}`);
+  }
+  eq('balanced after the document tests', await balanced(cD.id), '');
+  eq('credits reinstated after deleting the recurring contracts', JSON.stringify([await remOf(cD.id, d1.id), await remOf(cD.id, d2.id)]), JSON.stringify([100, 250]));
+
+  // ---- R6. legacy rows (pre-migration data): read fallback, backfill, no resurrection ----
+  const cG = await mkCust('QAZ-R Cliente legado');
+  const g1 = await mkCr(cG.id, 100, 'QAZ-R leg A'), g2 = await mkCr(cG.id, 100, 'QAZ-R leg B'), g3 = await mkCr(cG.id, 100, 'QAZ-R leg C'), g4 = await mkCr(cG.id, 100, 'QAZ-R leg D'), g5 = await mkCr(cG.id, 100, 'QAZ-R leg E');
+  const mkLegacyContract = async (cr, amount, tpl) => { const x = (await api('POST', '/api/contracts', cbR(cG.id, { templateId: tpl || tC, credits: [{ creditId: cr.id, amount }], installments: 1, dueDates: ['2027-01-10'] }))).body; created.contracts.push(x.id); payIds(x.payments || []); await sql.query('delete from credit_applications where contract_id = ?', [x.id]); return x; };
+  const RG = await mkRec(cG.id);
+  await api('POST', `/api/contracts/${RG.id}/items`, { serviceVersionId: svR, items: Array.from({ length: 3 }, (_, i) => ({ description: `QAZ-R leg ${i}` })), performedAt: '2026-10-05' });
+  const itG = (await api('GET', `/api/contracts/${RG.id}`)).body.items.map((i) => i.id);
+  const mkLegacyInvoice = async (it, cr, amount, ref) => { await api('POST', `/api/contracts/${RG.id}/invoices`, { itemIds: [it], reference: ref, credits: [{ creditId: cr.id, amount }], installments: 1, dueDates: ['2027-01-10'] }); const i = (await sql.query('select id from invoices where reference = ?', [ref]))[0][0]; payIds((await sql.query('select id from payments where invoice_id = ?', [i.id]))[0]); await sql.query('delete from credit_applications where invoice_id = ?', [i.id]); return i; };
+  const L1 = await mkLegacyContract(g1, 70);                // read fallback + delete
+  const L2 = await mkLegacyContract(g2, 40, tNd);           // document + edit
+  const L3 = await mkLegacyContract(g3, 50);                // edited to REMOVE all credits before the backfill
+  const L4 = await mkLegacyContract(g4, 30);                // left for the backfill
+  const I1 = await mkLegacyInvoice(itG[0], g5, 25, 'QAZ-R leg fat 1'); // fatura left for the backfill
+  eq('legacy-only rows really have no applications', (await appRows('contract_id in (?, ?, ?, ?) or invoice_id = ?', [L1.id, L2.id, L3.id, L4.id, I1.id])).length, 0);
+  const legRead = (await api('GET', `/api/contracts/${L1.id}`)).body;
+  ok('fallback: legacy-only contract is read as ONE application (70)', Number(legRead.creditApplied) === 70 && legRead.credits.length === 1 && legRead.credits[0].creditId === g1.id && Number(legRead.credits[0].amount) === 70, short(legRead.credits));
+  const legInv = (await api('GET', `/api/contracts/${RG.id}`)).body.invoices.find((i) => i.id === I1.id);
+  ok('fallback: legacy-only fatura is read as ONE application (25)', Number(legInv.creditApplied) === 25 && legInv.credits.length === 1 && Number(legInv.credits[0].amount) === 25, short(legInv && legInv.credits));
+  { const gg = await api('POST', `/api/contracts/${L2.id}/generate`); created.docs.push(gg.body.id); const t = docText((await api('GET', `/api/contract-documents/${gg.body.id}/download`)).buf, 'docx');
+    ok('fallback: document of a legacy-only contract shows credit -R$ 40,00 and the loop line', /Credito -R\$ 40,00/.test(t) && /Linha QAZ-R leg B = R\$ 40,00/.test(t), t.slice(0, 300)); }
+  r = await api('PUT', `/api/contracts/${L2.id}`, { comments: 'QAZ-R legado editado' });
+  ok('fallback: header edit of a legacy-only contract works and keeps the credit', r.status === 200 && Number(r.body.creditApplied) === 40, `${r.status}`);
+  r = await api('PUT', `/api/contracts/${L2.id}`, { comments: 'QAZ-R c', credits: [{ creditId: g2.id, amount: 60 }] });
+  ok('fallback: replacing credits on a legacy-only contract (old 40 reinstated once, new 60 applied)', r.status === 200 && (await remOf(cG.id, g2.id)) === 40 && (await appRows('contract_id = ?', [L2.id])).length === 1, `${r.status} rem ${await remOf(cG.id, g2.id)}`);
+  eq('fallback: DELETE legacy-only contract -> 204', (await api('DELETE', `/api/contracts/${L1.id}`)).status, 204);
+  eq('...credit reinstated exactly ONCE (100, not 170)', await remOf(cG.id, g1.id), 100);
+  r = await api('PUT', `/api/contracts/${L3.id}`, { comments: 'QAZ-R c', credits: [] });
+  ok('legacy-only contract edited to REMOVE all credits', r.status === 200 && Number(r.body.creditApplied) === 0 && (await remOf(cG.id, g3.id)) === 100, `${r.status}`);
+  const legCols = (await sql.query('select credit_id c, credit_applied a from contracts where id = ?', [L3.id]))[0][0];
+  ok('...legacy columns cleared too (credit_id null, credit_applied 0), so a backfill cannot resurrect it', legCols.c === null && Number(legCols.a) === 0, short(legCols));
+  const runAddColumns = () => { const o = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['--prefix', path.join(ROOT, 'server'), 'run', 'db:add-columns'], { cwd: ROOT, env: process.env, encoding: 'utf8', shell: process.platform === 'win32' }); const out = (o.stdout || '') + (o.stderr || ''); const m = /backfill credit_applications: (\d+) contrato\(s\) e (\d+) fatura\(s\)/.exec(out); return { code: o.status, c: m ? Number(m[1]) : -1, i: m ? Number(m[2]) : -1, out }; };
+  let bf = runAddColumns();
+  ok('add-columns backfill: inserted one row for each legacy-only record left (L2/L4 contracts, 1 fatura, plus others still legacy-only)', bf.code === 0 && bf.c >= 1 && bf.i >= 1, `${bf.code} ${bf.c} ${bf.i}`);
+  eq('backfill: L4 got exactly one row with amount 30', JSON.stringify((await appRows('contract_id = ?', [L4.id])).map((x) => [x.c, Number(x.a)])), JSON.stringify([[g4.id, 30]]));
+  eq('backfill: the fatura got exactly one row with amount 25', JSON.stringify((await appRows('invoice_id = ?', [I1.id])).map((x) => [x.c, Number(x.a)])), JSON.stringify([[g5.id, 25]]));
+  eq('backfill: records that already had applications (L2) were not duplicated', (await appRows('contract_id = ?', [L2.id])).length, 1);
+  eq('backfill: the contract edited to remove its credits (L3) was NOT resurrected', (await appRows('contract_id = ?', [L3.id])).length, 0);
+  bf = runAddColumns();
+  ok('add-columns second run inserts 0 (idempotent)', bf.code === 0 && bf.c === 0 && bf.i === 0, `${bf.code} ${bf.c} ${bf.i}`);
+  // the table really is created by add-columns when missing: drop it (no records with applications are touched) and run again
+  await sql.query('drop table credit_applications');
+  bf = runAddColumns();
+  const nLegacy = Number((await sql.query('select (select count(*) from contracts where credit_id is not null and credit_applied > 0) + (select count(*) from invoices where credit_id is not null and credit_applied > 0) n'))[0][0].n);
+  ok('table dropped -> add-columns recreates it and backfills one row per legacy record', bf.code === 0 && (await cnt('credit_applications')) === nLegacy && bf.c + bf.i === nLegacy, `${bf.code} rows ${await cnt('credit_applications')} expected ${nLegacy} (c${bf.c} i${bf.i})`);
+  eq('...amounts match the legacy credit_applied', Number((await sql.query('select coalesce(sum(amount),0) s from credit_applications'))[0][0].s), Number((await sql.query('select (select coalesce(sum(credit_applied),0) from contracts where credit_id is not null) + (select coalesce(sum(credit_applied),0) from invoices where credit_id is not null) s'))[0][0].s));
+  bf = runAddColumns(); eq('...second run again inserts 0', bf.c + bf.i, 0);
+  // after the backfill the normal paths work on the former legacy records
+  eq('after backfill: delete L4 -> 204 and its credit is back at 100', (await api('DELETE', `/api/contracts/${L4.id}`)).status === 204 && (await remOf(cG.id, g4.id)) === 100, true);
+  eq('after backfill: delete the fatura contract -> credit E back at 100', (await api('DELETE', `/api/contracts/${RG.id}`)).status === 204 && (await remOf(cG.id, g5.id)) === 100, true);
+  await api('DELETE', `/api/contracts/${L2.id}`);
+  eq('legacy customer balanced at the end', await balanced(cG.id), '');
+  await sql.query("delete from payments where description like 'QAZ-R%'");
+
+  }
   sec('N. Misc regression');
   r = await api('GET', '/api/payments'); ok('payments list', r.status === 200 && Array.isArray(r.body));
   r = await api('GET', '/api/reports/summary'); eq('reports/summary 200', r.status, 200);
@@ -1183,6 +1489,7 @@ async function cleanup() {
   }
   for (const d of [...new Set(created.docs)]) await tryit('doc ' + d, () => api('DELETE', `/api/contract-documents/${d}`));
   for (const i of created.invoices) await tryit('invoice ' + i, () => api('DELETE', `/api/invoices/${i}`));
+  await tryit('credit applications', async () => { await sql.query("delete from credit_applications where credit_id in (select id from customer_credits where description like 'QAZ%')"); });
   await tryit('bank rows', async () => {
     await sql.query("delete from transactions where import_id in (select id from bank_imports where file_name like 'QAZ-SMOKE%')");
     await sql.query("delete from bank_imports where file_name like 'QAZ-SMOKE%'");

@@ -53,10 +53,13 @@ st.R1 = mustOk(await api('POST', '/api/contracts', { customerId: st.cu.id, type:
 
 // payments for Painel / Fluxo de Caixa
 // (the 'current month' checks need these inside the current month, also on the last days of a month)
+// late payments live in the PREVIOUS month (relative to the run date), so the specs do not depend on the calendar
+const prevMonth = (() => { const d = new Date(today + 'T12:00:00'); d.setDate(1); d.setMonth(d.getMonth() - 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; })();
+st.prevMonth = prevMonth;
 const soon = (n) => { const x = L.addDays(today, n); return x.slice(0, 7) === today.slice(0, 7) ? x : today; };
 const pay = async (o) => mustOk(await api('POST', '/api/payments', o), 'payment ' + o.description);
-st.pLateIn = await pay({ description: 'QAZ-UI entrada atrasada', amount: '123.45', flow: 'in', dueDate: '2026-09-15', customerId: st.cu.id, categoryId: st.catIn.id });
-st.pLateOut = await pay({ description: 'QAZ-UI saida atrasada', amount: '67.89', flow: 'out', dueDate: '2026-09-20', categoryId: st.catOut.id });
+st.pLateIn = await pay({ description: 'QAZ-UI entrada atrasada', amount: '123.45', flow: 'in', dueDate: `${prevMonth}-15`, customerId: st.cu.id, categoryId: st.catIn.id });
+st.pLateOut = await pay({ description: 'QAZ-UI saida atrasada', amount: '67.89', flow: 'out', dueDate: `${prevMonth}-20`, categoryId: st.catOut.id });
 st.pOpenIn = await pay({ description: 'QAZ-UI entrada aberta', amount: '1234.56', flow: 'in', dueDate: soon(2), customerId: st.cu.id, contractId: st.C1.id, categoryId: st.catIn.id });
 st.pOpenOut = await pay({ description: 'QAZ-UI saida a pagar', amount: '1000', flow: 'out', dueDate: soon(1), categoryId: st.catAgua.id });
 st.pRecv = await pay({ description: 'QAZ-UI entrada recebida', amount: '50', flow: 'in', dueDate: today, receiptStatus: 'received', receivedDate: today, customerId: st.cu.id });

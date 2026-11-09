@@ -38,7 +38,7 @@ await flow('Painel', async () => {
   const fmt = (n) => n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }).replace(/ /g, ' ');
   const norm = (s) => s.replace(/ /g, ' ');
   ok(`A receber = ${fmt(toRecv)} (matches API)`, norm(txt).includes(fmt(toRecv)), fmt(toRecv));
-  ok('late payment table lists "QAZ-UI entrada atrasada" with 15/09/2026', /QAZ-UI entrada atrasada/.test(txt) && /15\/09\/2026/.test(txt));
+  ok('late payment table lists "QAZ-UI entrada atrasada" with 15/<prev month>', /QAZ-UI entrada atrasada/.test(txt) && txt.includes(L.br(st.pLateIn.dueDate)));
   ok('overdue contract card lists C2 with BR date', new RegExp(st.C2.number.replace('/', '\\/')).test(txt) && /Contratos atrasados/.test(txt));
   ok('Próximos pagamentos shows open entrada with Aberto and open saída with A pagar', /QAZ-UI entrada aberta/.test(txt) && /QAZ-UI saida a pagar/.test(txt) && /Aberto/i.test(txt) && /A pagar/i.test(txt));
   ok('Painel does not list received/paid in Próximos', true);
@@ -62,13 +62,14 @@ await flow('Fluxo de Caixa: periodo e filtros', async () => {
   ok('Tipo filter present, Situação labels', /Situação/.test(t));
   await L.shot(page, 'fluxo_caixa_desktop');
   await page.getByRole('button', { name: 'Mês anterior' }).click();
-  await page.getByText(/Setembro de 2026/).first().waitFor();
+  const monthLabel = (iso) => { const n = new Date(iso + 'T12:00:00').toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }); return new RegExp(n.charAt(0).toUpperCase() + n.slice(1)); };
+  await page.getByText(monthLabel(st.pLateIn.dueDate)).first().waitFor();
   t = await U.bodyText(page);
   ok('previous month shows late payments with Atrasado badge', /QAZ-UI entrada atrasada/.test(t) && /QAZ-UI saida atrasada/.test(t) && (await U.row(page, 'QAZ-UI entrada atrasada').innerText()).match(/atrasado/i));
   ok('late saída row also Atrasado', (await U.row(page, 'QAZ-UI saida atrasada').innerText()).match(/atrasado/i));
   await page.getByRole('button', { name: 'Próximo mês' }).click();
   await page.getByRole('button', { name: 'Próximo mês' }).click();
-  await page.getByText(/Novembro de 2026/).first().waitFor();
+  { const d = new Date(today + 'T12:00:00'); d.setDate(1); d.setMonth(d.getMonth() + 1); await page.getByText(monthLabel(d.toISOString().slice(0, 10))).first().waitFor(); } // two clicks from the previous month = the NEXT month
   await page.getByRole('button', { name: 'Mês atual' }).click();
   await page.getByText(cap, { exact: true }).first().waitFor();
   await page.getByRole('button', { name: 'Todo o período' }).click();
@@ -121,12 +122,13 @@ await flow('Fluxo de Caixa: periodo e filtros', async () => {
   ok('Tipo Saída filter', /QAZ-UI saida a pagar/.test(t) && !/QAZ-UI entrada aberta/.test(t));
   await clr();
   // date filters typed
-  await U.typeDate(page, 'Venc. de', '01/09/2026');
-  await U.typeDate(page, 'Venc. até', '30/09/2026');
+  const pm = st.prevMonth.split('-'); // [yyyy, mm]
+  await U.typeDate(page, 'Venc. de', `01/${pm[1]}/${pm[0]}`);
+  await U.typeDate(page, 'Venc. até', `28/${pm[1]}/${pm[0]}`);
   t = await U.bodyText(page);
-  ok('Venc. de/até typed dd/MM/yyyy filters to September', /QAZ-UI entrada atrasada/.test(t) && !/QAZ-UI entrada aberta/.test(t));
+  ok('Venc. de/até typed dd/MM/yyyy filters to the previous month', /QAZ-UI entrada atrasada/.test(t) && !/QAZ-UI entrada aberta/.test(t));
   const v = await page.getByLabel('Venc. de').first().inputValue();
-  eq('DateField shows typed date in dd/MM/yyyy', v, '01/09/2026');
+  eq('DateField shows typed date in dd/MM/yyyy', v, `01/${pm[1]}/${pm[0]}`);
   await clr();
 });
 
