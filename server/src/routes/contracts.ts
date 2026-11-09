@@ -157,6 +157,8 @@ function contractBodyError(body: any): string | null {
   ] as const) {
     if (optionalId(b[k]) === false) return `${label} inválido.`;
   }
+  const credErr = creditsError(b.credits);
+  if (credErr) return credErr;
   if (b.type != null && !isOneOf(CONTRACT_TYPES, b.type)) return 'Tipo de contrato inválido.';
   if (optionalDate(b.executionDate) === false) return 'Data inválida (data de execução).';
   if (!textOk(b.title, 255)) return 'Título inválido (máximo 255 caracteres).';
@@ -195,6 +197,8 @@ function invoiceBodyError(body: any): string | null {
     return 'Desconto inválido.';
   }
   if (optionalId(body.creditId) === false) return 'Crédito inválido.';
+  const credErr = creditsError(body.credits);
+  if (credErr) return credErr;
   const inst = installmentsError(body.installments);
   if (inst) return inst;
   const dd = dueDatesError(body);
@@ -550,59 +554,178 @@ async function persistContractModifiers(contractId: number, modifiers: any[] | u
   if (rows.length > 0) await ex.insert(schema.contractModifiers).values(rows);
 }
 
-// Deduct up to `total` from a customer's credit; returns the amount applied and
-// reduces the credit's remaining balance. Validates the credit belongs to the customer.
-async function applyCredit(opts: {
-  creditId: number | null | undefined;
-  customerId: number | null;
-  total: number;
-}, ex: Exec = dbExec()): Promise<number> {
-  const { creditId, customerId, total } = opts;
-  if (!creditId || !customerId || total <= 0) return 0;
-  const [credit] = await ex
+// ---------------------------------------------------------------------------
+// Customer credits applied to a one-time contract or a fatura.
+// One row per credit used in `credit_applications` (a record may use several
+// credits, each with its own amount). The LEGACY columns contracts/invoices
+// .credit_id + .credit_applied are still written (credit_applied = TOTAL of the
+// applications, credit_id = the first credit or null) so totals and documents that
+// read creditApplied keep working; they will be dropped in a later step.
+// READ rule: applications come from credit_applications; only when a record has NO
+// rows but legacy credit_id/credit_applied (a database not backfilled yet) is the
+// legacy pair read as a single application. Rows win when both exist (no double count).
+// Lock order: contract -> invoices -> payments -> credits, credits in ASCENDING id.
+// ---------------------------------------------------------------------------
+type CreditRow = typeof schema.customerCredits.$inferSelect;
+type CreditUse = { creditId: number; amount: number };
+// A requested use; amount null = legacy single `creditId` ("as much as possible").
+type CreditRequest = { creditId: number; amount: number | null };
+type CreditRef = { contractId: number } | { invoiceId: number };
+
+const fmtBrl = (n: number) => n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+const sumUses = (uses: CreditUse[]) => round2(uses.reduce((s, u) => s + u.amount, 0));
+
+// Shape check of `credits: [{ creditId, amount }]` (undefined/null = not sent).
+function creditsError(credits: unknown): string | null {
+  if (credits === undefined || credits === null) return null;
+  if (!Array.isArray(credits) || credits.length > 100) return 'Lista de créditos inválida.';
+  const seen = new Set<number>();
+  for (const c of credits) {
+    if (!c || typeof c !== 'object') return 'Lista de créditos inválida.';
+    const id = parseId((c as any).creditId);
+    if (id === null) return 'Crédito inválido.';
+    const amount = parseMoney((c as any).amount);
+    if (amount === null || amount <= 0) return 'Valor de crédito inválido: informe um valor maior que zero.';
+    if (seen.has(id)) return 'Crédito repetido na lista.';
+    seen.add(id);
+  }
+  return null;
+}
+
+// Requested credits from a body (already validated): the `credits` array, else the legacy
+// single `creditId` (amount decided on the server). undefined = the body says nothing.
+function parseCreditRequests(body: any): CreditRequest[] | undefined {
+  if (Array.isArray(body?.credits)) {
+    return body.credits.map((c: any) => ({ creditId: Number(c.creditId), amount: parseMoney(c.amount) as number }));
+  }
+  const legacy = parseId(body?.creditId);
+  if (legacy !== null && (body?.credits === undefined || body?.credits === null)) {
+    return [{ creditId: legacy, amount: null }];
+  }
+  return undefined;
+}
+
+// Lock the credit rows (FOR UPDATE) in ASCENDING id order and return them by id.
+async function lockCredits(ids: number[], ex: Exec): Promise<Map<number, CreditRow>> {
+  const uniq = [...new Set(ids)].sort((a, b) => a - b);
+  if (uniq.length === 0) return new Map();
+  const rows = await ex
     .select()
     .from(schema.customerCredits)
-    .where(eq(schema.customerCredits.id, Number(creditId)))
+    .where(inArray(schema.customerCredits.id, uniq))
+    .orderBy(schema.customerCredits.id)
     .for('update');
-  if (!credit || credit.customerId !== customerId) return 0;
-  const remaining = Number(credit.remaining);
-  if (remaining <= 0) return 0;
-  const applied = round2(Math.min(remaining, total));
-  await ex
-    .update(schema.customerCredits)
-    .set({ remaining: String(round2(remaining - applied)) })
-    .where(eq(schema.customerCredits.id, credit.id));
-  return applied;
+  return new Map(rows.map((r) => [r.id, r]));
 }
 
-// Description of the credit used on a document (empty when none was applied).
-async function creditDescription(creditId: number | null | undefined): Promise<string> {
-  if (!creditId) return '';
-  const [row] = await db
-    .select({ description: schema.customerCredits.description })
-    .from(schema.customerCredits)
-    .where(eq(schema.customerCredits.id, Number(creditId)));
-  return row?.description ?? '';
-}
-
-// Give back a credit that an invoice had applied (on invoice delete/edit): the
-// applied amount returns to the credit's remaining balance.
-async function reinstateInvoiceCredit(
-  inv: { creditId: number | null; creditApplied: string | null },
+// Credits applied to a record: its credit_applications rows, or (no rows) the legacy
+// single credit_id/credit_applied pair.
+async function readAppliedCredits(
+  ref: CreditRef,
+  legacy: { creditId: number | null; creditApplied: string | null },
   ex: Exec = dbExec()
-) {
-  const applied = Number(inv.creditApplied ?? 0);
-  if (!inv.creditId || applied <= 0) return;
-  const [credit] = await ex
-    .select()
+): Promise<CreditUse[]> {
+  const cond =
+    'contractId' in ref
+      ? eq(schema.creditApplications.contractId, ref.contractId)
+      : eq(schema.creditApplications.invoiceId, ref.invoiceId);
+  const rows = await ex.select().from(schema.creditApplications).where(cond).orderBy(schema.creditApplications.id);
+  if (rows.length > 0) return rows.map((r) => ({ creditId: r.creditId, amount: Number(r.amount) }));
+  const applied = Number(legacy.creditApplied ?? 0);
+  return legacy.creditId && applied > 0 ? [{ creditId: legacy.creditId, amount: applied }] : [];
+}
+
+// Applied credits with their descriptions, as exposed to the client and the documents.
+async function describeCredits(uses: CreditUse[], ex: Exec = dbExec()) {
+  if (uses.length === 0) return [];
+  const rows = await ex
+    .select({ id: schema.customerCredits.id, description: schema.customerCredits.description })
     .from(schema.customerCredits)
-    .where(eq(schema.customerCredits.id, inv.creditId))
-    .for('update');
-  if (!credit) return;
-  await ex
-    .update(schema.customerCredits)
-    .set({ remaining: String(round2(Number(credit.remaining) + applied)) })
-    .where(eq(schema.customerCredits.id, credit.id));
+    .where(inArray(schema.customerCredits.id, [...new Set(uses.map((u) => u.creditId))]));
+  const byId = new Map(rows.map((r) => [r.id, r.description]));
+  return uses.map((u) => ({ creditId: u.creditId, description: byId.get(u.creditId) ?? '', amount: u.amount }));
+}
+
+// Spend the requested credits (validates ownership, balance and the total cap), reducing
+// each credit's remaining balance; returns what was applied. Must run in a transaction.
+// `total` is the amount to be covered (contract/fatura total after discounts/modifiers).
+async function applyCreditRequests(
+  requests: CreditRequest[],
+  customerId: number | null,
+  total: number,
+  overMessage: string,
+  ex: Exec
+): Promise<CreditUse[]> {
+  if (requests.length === 0) return [];
+  if (!customerId) throw new HttpError(400, 'Crédito não encontrado.');
+  const locked = await lockCredits(requests.map((r) => r.creditId), ex);
+  const uses: CreditUse[] = [];
+  let left = total;
+  for (const r of [...requests].sort((a, b) => a.creditId - b.creditId)) {
+    const credit = locked.get(r.creditId);
+    if (!credit || credit.customerId !== customerId) throw new HttpError(400, 'Crédito não encontrado.');
+    const remaining = Number(credit.remaining);
+    let amount: number;
+    if (r.amount === null) {
+      amount = round2(Math.min(remaining, left)); // legacy single creditId
+      if (amount <= 0) continue;
+    } else {
+      amount = round2(r.amount);
+      if (amount <= 0) throw new HttpError(400, 'Valor de crédito inválido: informe um valor maior que zero.');
+      if (amount > remaining + 0.004) {
+        throw new HttpError(400, `Saldo insuficiente no crédito "${credit.description}" (disponível ${fmtBrl(remaining)}).`);
+      }
+    }
+    left = round2(left - amount);
+    if (left < -0.004) throw new HttpError(400, overMessage);
+    await ex
+      .update(schema.customerCredits)
+      .set({ remaining: String(round2(Math.max(0, remaining - amount))) })
+      .where(eq(schema.customerCredits.id, credit.id));
+    uses.push({ creditId: credit.id, amount });
+  }
+  return uses;
+}
+
+// Give applied credits back (contract/fatura edit or delete): each amount returns to its
+// credit's remaining balance (never above the credit's value). Several uses of one credit
+// are summed; credits are locked in ascending id order.
+async function reinstateCredits(uses: CreditUse[], ex: Exec = dbExec()) {
+  const byCredit = new Map<number, number>();
+  for (const u of uses) if (u.amount > 0) byCredit.set(u.creditId, round2((byCredit.get(u.creditId) ?? 0) + u.amount));
+  if (byCredit.size === 0) return;
+  const locked = await lockCredits([...byCredit.keys()], ex);
+  for (const [creditId, amount] of [...byCredit.entries()].sort((a, b) => a[0] - b[0])) {
+    const credit = locked.get(creditId);
+    if (!credit) continue;
+    const back = round2(Math.min(Number(credit.value), Number(credit.remaining) + amount));
+    await ex.update(schema.customerCredits).set({ remaining: String(back) }).where(eq(schema.customerCredits.id, creditId));
+  }
+}
+
+// Replace a record's credit_applications rows and keep the legacy columns in sync
+// (credit_applied = total, credit_id = first credit or null). Returns the total applied.
+async function writeCreditApplications(ref: CreditRef, uses: CreditUse[], ex: Exec): Promise<number> {
+  const total = sumUses(uses);
+  const legacy = { creditId: uses[0]?.creditId ?? null, creditApplied: String(total) };
+  if ('contractId' in ref) {
+    await ex.delete(schema.creditApplications).where(eq(schema.creditApplications.contractId, ref.contractId));
+    if (uses.length > 0) {
+      await ex
+        .insert(schema.creditApplications)
+        .values(uses.map((u) => ({ creditId: u.creditId, contractId: ref.contractId, amount: String(u.amount) })));
+    }
+    await ex.update(schema.contracts).set(legacy).where(eq(schema.contracts.id, ref.contractId));
+  } else {
+    await ex.delete(schema.creditApplications).where(eq(schema.creditApplications.invoiceId, ref.invoiceId));
+    if (uses.length > 0) {
+      await ex
+        .insert(schema.creditApplications)
+        .values(uses.map((u) => ({ creditId: u.creditId, invoiceId: ref.invoiceId, amount: String(u.amount) })));
+    }
+    await ex.update(schema.invoices).set(legacy).where(eq(schema.invoices.id, ref.invoiceId));
+  }
+  return total;
 }
 
 type InvoiceBody = {
@@ -612,7 +735,8 @@ type InvoiceBody = {
   installments?: number | string;
   dueDates?: string[];
   modifiers?: any[];
-  creditId?: number | null;
+  // Credits to spend (already parsed by the route; legacy single creditId arrives as amount null).
+  credits?: CreditRequest[];
   creditDescription?: string;
 };
 
@@ -633,7 +757,7 @@ async function composeInvoice(
   ex: Exec = dbExec(),
   minInstallment?: number
 ) {
-  const { reference, comments, discountPercent, installments, dueDates, modifiers, creditId, creditDescription } = body;
+  const { reference, comments, discountPercent, installments, dueDates, modifiers, credits, creditDescription } = body;
 
   const subtotal = billable.reduce((s, it) => s + Number(it.lineTotal), 0);
   const modsSum = (modifiers ?? [])
@@ -643,7 +767,15 @@ async function composeInvoice(
   // clamped to 0 and the surplus becomes a customer credit (below).
   const rawTotal = round2(withDisc(subtotal, discountPercent) + modsSum);
   const total = Math.max(0, rawTotal);
-  const creditApplied = await applyCredit({ creditId, customerId, total }, ex);
+  // Credits are applied BEFORE the installments are split (base = total - credits).
+  const uses = await applyCreditRequests(
+    credits ?? [],
+    customerId,
+    total,
+    'O total dos créditos excede o valor da fatura.',
+    ex
+  );
+  const creditApplied = sumUses(uses);
   const base = Math.max(0, round2(total - creditApplied));
   const count = base > 0 ? Math.min(Math.max(1, Number(installments) || 1), await maxInstallmentsFor(base, minInstallment)) : 0;
 
@@ -655,10 +787,10 @@ async function composeInvoice(
       discountPercent: String(discountPercent ?? 0),
       installments: count,
       total: String(total),
-      creditId: creditApplied > 0 ? Number(creditId) : null,
-      creditApplied: creditApplied > 0 ? String(creditApplied) : '0',
     })
     .where(eq(schema.invoices.id, invoiceId));
+  // Applications + legacy credit_id/credit_applied (kept in sync).
+  await writeCreditApplications({ invoiceId }, uses, ex);
 
   const modRows = (modifiers ?? [])
     .filter((m: any) => m && m.name)
@@ -772,10 +904,15 @@ async function loadFullContract(id: number) {
       .select()
       .from(schema.invoiceModifiers)
       .where(eq(schema.invoiceModifiers.invoiceId, inv.id));
-    invoices.push({ ...inv, documents: invDocs, payments: invPays, modifiers: invMods });
+    const invCredits = await describeCredits(await readAppliedCredits({ invoiceId: inv.id }, inv));
+    invoices.push({ ...inv, documents: invDocs, payments: invPays, modifiers: invMods, credits: invCredits });
   }
 
-  return { ...contract, customer, items: itemsFull, documents, invoices, payments, modifiers };
+  // Credits applied to the one-time contract: [{ creditId, description, amount }]
+  // (creditApplied stays the TOTAL, kept in sync with the applications).
+  const credits = await describeCredits(await readAppliedCredits({ contractId: id }, contract));
+
+  return { ...contract, customer, items: itemsFull, documents, invoices, payments, modifiers, credits };
 }
 
 // Persist several items (one-time contract scope).
@@ -884,19 +1021,14 @@ export function registerContractRoutes(app: FastifyInstance) {
       executionAddress,
       duration,
       quantity,
-      creditId,
     } = req.body ?? {};
     const isOneTime = (type ?? 'contract') !== 'invoice';
+    // Credits to spend ([{creditId, amount}] or the legacy single creditId); validated
+    // against the customer/balances inside the transaction (400 'Crédito não encontrado.').
+    const creditRequests = isOneTime ? parseCreditRequests(req.body) ?? [] : [];
     const { rows, total: itemsSum } = await buildItems(isOneTime ? items ?? [] : []);
     if (isOneTime && Array.isArray(items) && rows.length < items.length) {
       return badRequest(reply, 'Serviço não encontrado.');
-    }
-    if (isOneTime && creditId) {
-      const [cr] = await db
-        .select({ customerId: schema.customerCredits.customerId })
-        .from(schema.customerCredits)
-        .where(eq(schema.customerCredits.id, Number(creditId)));
-      if (!cr || cr.customerId !== (customerId ?? null)) return badRequest(reply, 'Crédito não encontrado.');
     }
     // A one-time contract's title is the (single) service name.
     const derivedTitle = isOneTime ? rows[0]?.serviceName ?? title ?? null : title ?? null;
@@ -917,7 +1049,9 @@ export function registerContractRoutes(app: FastifyInstance) {
     // Everything is written in ONE transaction (contract, items, modifiers, credit
     // use, installments). The number is allocated inside it; if another machine took
     // the same number first, the unique index rejects it and we retry with the next.
-    const contractId = await withMutex('contract-number', () => withNumberRetry(() =>
+    let contractId: number;
+    try {
+    contractId = await withMutex('contract-number', () => withNumberRetry(() =>
       db.transaction(async (tx) => {
         const number = await nextContractNumber(isOneTime ? 'contract' : 'invoice', tx);
         const res: any = await tx
@@ -946,21 +1080,27 @@ export function registerContractRoutes(app: FastifyInstance) {
         if (isOneTime) await persistContractModifiers(newId, modifiers, tx);
         const total = await recomputeContractTotal(newId, tx);
 
-        // Apply a prepaid credit: it reduces the amount split into installments.
-        const creditApplied = isOneTime
-          ? await applyCredit({ creditId, customerId: customerId ?? null, total }, tx)
-          : 0;
+        // Apply prepaid credits (one amount per credit): they reduce the amount split
+        // into installments.
+        const uses = isOneTime
+          ? await applyCreditRequests(
+              creditRequests,
+              customerId ?? null,
+              total,
+              'O total dos créditos excede o valor do contrato.',
+              tx
+            )
+          : [];
+        const creditApplied = sumUses(uses);
         const base = Math.max(0, round2(total - creditApplied));
         const finalCount = base > 0 ? Math.min(Math.max(1, Number(installments) || 1), await maxInstallmentsFor(base, minInst)) : 0;
 
         if (isOneTime) {
           await tx
             .update(schema.contracts)
-            .set({
-              installments: finalCount,
-              ...(creditApplied > 0 ? { creditId: Number(creditId), creditApplied: String(creditApplied) } : {}),
-            })
+            .set({ installments: finalCount })
             .where(eq(schema.contracts.id, newId));
+          if (uses.length > 0) await writeCreditApplications({ contractId: newId }, uses, tx);
           // Generate installment payments only for the amount still owed after credit.
           if (base > 0) {
             await createInstallmentPayments(
@@ -979,6 +1119,10 @@ export function registerContractRoutes(app: FastifyInstance) {
         return newId;
       })
     ));
+    } catch (e) {
+      if (e instanceof HttpError) return reply.code(e.status).send({ error: e.message });
+      throw e;
+    }
 
     reply.code(201);
     return loadFullContract(contractId);
@@ -1020,7 +1164,10 @@ export function registerContractRoutes(app: FastifyInstance) {
       quantity,
     } = req.body ?? {};
 
+    // `credits` (full list, possibly empty) REPLACES the applied credits; omitted = keep them.
+    const creditRequests = Array.isArray(req.body?.credits) ? parseCreditRequests(req.body) ?? [] : undefined;
     const isMoneyEdit =
+      creditRequests !== undefined ||
       Array.isArray(items) ||
       (installments !== undefined && installments !== null && installments !== '') ||
       Array.isArray(dueDates);
@@ -1065,9 +1212,8 @@ export function registerContractRoutes(app: FastifyInstance) {
           newTitle = title;
         }
 
-        await tx
-          .update(schema.contracts)
-          .set({
+        // Header fields actually sent; drizzle rejects an empty .set(), so skip the UPDATE when none.
+        const headerSet = {
             ...(customerId !== undefined ? { customerId } : {}),
             ...(type !== undefined ? { type } : {}),
             ...(newTitle !== undefined ? { title: newTitle } : {}),
@@ -1082,15 +1228,40 @@ export function registerContractRoutes(app: FastifyInstance) {
             ...(quantity !== undefined
               ? { quantity: quantity != null && quantity !== '' ? Number(quantity) : null }
               : {}),
-          })
-          .where(eq(schema.contracts.id, id));
+          };
+        if (Object.keys(headerSet).length > 0) {
+          await tx.update(schema.contracts).set(headerSet).where(eq(schema.contracts.id, id));
+        }
 
         const total = await recomputeContractTotal(id, tx);
 
-        // The stored credit stays applied; installments are split on the NET total.
-        const creditApplied = Number(locked.creditApplied ?? 0);
-        if (isMoneyEdit && creditApplied > 0 && total < creditApplied) {
-          throw new HttpError(400, 'O valor do contrato ficou menor que o crédito aplicado.');
+        // Credits: a `credits` list replaces the applications (reinstate the old ones, apply
+        // the new ones, both under credit row locks taken in ascending id order); otherwise
+        // the stored credits stay applied. Installments are split on the NET total.
+        const tooSmall = 'O valor do contrato ficou menor que o crédito aplicado.';
+        const current = await readAppliedCredits({ contractId: id }, locked, tx);
+        let creditApplied = sumUses(current);
+        // Recurring contracts hold no credit themselves (their faturas do): ignore the list.
+        const isRecurringNow = (type ?? locked.type) === 'invoice';
+        const wanted = isRecurringNow ? undefined : creditRequests;
+        if (isRecurringNow && current.length > 0) {
+          // Type changed from one-time to recurring: credits only apply to one-time contracts.
+          await lockCredits(current.map((u) => u.creditId), tx);
+          await reinstateCredits(current, tx);
+          creditApplied = await writeCreditApplications({ contractId: id }, [], tx);
+        } else if (wanted !== undefined) {
+          await lockCredits([...current.map((u) => u.creditId), ...wanted.map((r) => r.creditId)], tx);
+          await reinstateCredits(current, tx);
+          const uses = await applyCreditRequests(
+            wanted,
+            (customerId !== undefined ? customerId : locked.customerId) ?? null,
+            total,
+            'O total dos créditos excede o valor do contrato.',
+            tx
+          );
+          creditApplied = await writeCreditApplications({ contractId: id }, uses, tx);
+        } else if (isMoneyEdit && creditApplied > 0 && total < creditApplied) {
+          throw new HttpError(400, tooSmall);
         }
         const base = Math.max(0, round2(total - creditApplied));
 
@@ -1165,10 +1336,11 @@ export function registerContractRoutes(app: FastifyInstance) {
         // Reinstate the credit consumed: the contract's own (one-time) and each
         // invoice's (recurring). They are disjoint, so nothing is counted twice.
         // Credits are locked in ascending id order (same order everywhere: no deadlocks).
-        const withCredit = [contract, ...invoices]
-          .filter((d) => d.creditId)
-          .sort((a, b) => Number(a.creditId) - Number(b.creditId));
-        for (const d of withCredit) await reinstateInvoiceCredit(d, tx);
+        // Every application (rows, or the legacy pair when a record has no rows) goes back to
+        // its credit exactly once; reinstateCredits sums per credit and locks ascending.
+        const toReinstate: CreditUse[] = await readAppliedCredits({ contractId: id }, contract, tx);
+        for (const inv of invoices) toReinstate.push(...(await readAppliedCredits({ invoiceId: inv.id }, inv, tx)));
+        await reinstateCredits(toReinstate, tx);
 
         const docs = await tx
           .select({ fileName: schema.contractDocuments.fileName })
@@ -1330,6 +1502,7 @@ export function registerContractRoutes(app: FastifyInstance) {
     if (!contract) return reply.code(404).send({ error: 'Contrato não encontrado.' });
 
     const minInst = await getMinInstallmentValue(); // read before the transaction
+    const creditRequests = parseCreditRequests(req.body) ?? [];
     try {
       // The in-process mutex serializes reference allocation on this server; the
       // contract row lock (same order as invoice edit/delete: contract, payments,
@@ -1366,7 +1539,16 @@ export function registerContractRoutes(app: FastifyInstance) {
               .$returningId();
             const invoiceId = invRes[0].id;
 
-            await composeInvoice(invoiceId, contractId, locked.customerId, req.body, billable, true, tx, minInst);
+            await composeInvoice(
+              invoiceId,
+              contractId,
+              locked.customerId,
+              { ...req.body, credits: creditRequests },
+              billable,
+              true,
+              tx,
+              minInst
+            );
             await recomputeContractTotal(contractId, tx);
           })
         )
@@ -1395,6 +1577,7 @@ export function registerContractRoutes(app: FastifyInstance) {
     const invError = invoiceBodyError(req.body);
     if (invError) return badRequest(reply, invError);
     const minInst = await getMinInstallmentValue(); // read before the transaction
+    const creditRequests = parseCreditRequests(req.body) ?? []; // full list: replaces the old credits
     try {
       await withNumberRetry(() =>
         db.transaction(async (tx) => {
@@ -1428,7 +1611,14 @@ export function registerContractRoutes(app: FastifyInstance) {
 
           // Undo the old composition: reinstate applied credit, unbill its items, drop
           // its payments/modifiers/generated documents (all stale after an edit).
-          await reinstateInvoiceCredit(cur, tx);
+          // (the new credits are applied by composeInvoice; every credit involved is locked
+          // up front, in ascending id order)
+          const oldCredits = await readAppliedCredits({ invoiceId }, cur, tx);
+          await lockCredits(
+            [...oldCredits.map((u) => u.creditId), ...(creditRequests ?? []).map((r) => r.creditId)],
+            tx
+          );
+          await reinstateCredits(oldCredits, tx);
           await tx
             .update(schema.contractItems)
             .set({ invoiceId: null })
@@ -1437,7 +1627,16 @@ export function registerContractRoutes(app: FastifyInstance) {
           await tx.delete(schema.invoiceModifiers).where(eq(schema.invoiceModifiers.invoiceId, invoiceId));
           await tx.delete(schema.contractDocuments).where(eq(schema.contractDocuments.invoiceId, invoiceId));
 
-          await composeInvoice(invoiceId, cur.contractId, contract.customerId, req.body, billable, false, tx, minInst);
+          await composeInvoice(
+            invoiceId,
+            cur.contractId,
+            contract.customerId,
+            { ...req.body, credits: creditRequests },
+            billable,
+            false,
+            tx,
+            minInst
+          );
           await recomputeContractTotal(cur.contractId, tx);
         })
       );
@@ -1470,7 +1669,7 @@ export function registerContractRoutes(app: FastifyInstance) {
               'Não é possível excluir: já há pagamento(s) recebido(s) nesta fatura. Para cancelar uma fatura com pagamentos recebidos será necessário o processo de rescisão (ainda não implementado).'
             );
           }
-          await reinstateInvoiceCredit(cur, tx);
+          await reinstateCredits(await readAppliedCredits({ invoiceId }, cur, tx), tx);
           await tx
             .update(schema.contractItems)
             .set({ invoiceId: null })
@@ -1498,6 +1697,7 @@ export function registerContractRoutes(app: FastifyInstance) {
     const now = new Date();
     const brl = (n: number) => n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
     const invItems = full.items.filter((it) => it.invoiceId === invoiceId);
+    const invCredits = full.invoices.find((i) => i.id === invoiceId)?.credits ?? [];
 
     // Actual money discounted: per-item/additional discounts + invoice-level %
     // on the items subtotal + modifier %.
@@ -1576,8 +1776,12 @@ export function registerContractRoutes(app: FastifyInstance) {
       // conditional blocks). {credit_applied} is shown as a negative deduction.
       credit_used: Number(inv.creditApplied ?? 0) > 0,
       credit_applied: brl(Number(inv.creditApplied ?? 0) > 0 ? -Number(inv.creditApplied) : 0),
-      credit_description: await creditDescription(inv.creditId),
+      // {credit_description}: the descriptions of all credits used, joined with ', '.
+      credit_description: invCredits.map((cr) => cr.description).join(', '),
       total_after_credit: brl(Number(inv.total) - Number(inv.creditApplied ?? 0)),
+      // One row per credit used: {#credits}{credit_description} {credit_amount}{/credits}
+      // ({credit_amount} is POSITIVE, unlike the negative {credit_applied} total).
+      credits: invCredits.map((cr) => ({ credit_description: cr.description, credit_amount: brl(cr.amount) })),
       // {date} stays the long form for compatibility; {date_short} is dd/MM/yyyy,
       // {date_long} an explicit alias — both usable in the template.
       date: longDatePtBR(now),
@@ -1752,8 +1956,12 @@ export function registerContractRoutes(app: FastifyInstance) {
       // conditional blocks). {credit_applied} is shown as a negative deduction.
       credit_used: Number(full.creditApplied ?? 0) > 0,
       credit_applied: brl(Number(full.creditApplied ?? 0) > 0 ? -Number(full.creditApplied) : 0),
-      credit_description: await creditDescription(full.creditId),
+      // {credit_description}: the descriptions of all credits used, joined with ', '.
+      credit_description: full.credits.map((cr) => cr.description).join(', '),
       total_after_credit: brl(Number(full.total) - Number(full.creditApplied ?? 0)),
+      // One row per credit used: {#credits}{credit_description} {credit_amount}{/credits}
+      // ({credit_amount} is POSITIVE, unlike the negative {credit_applied} total).
+      credits: full.credits.map((cr) => ({ credit_description: cr.description, credit_amount: brl(cr.amount) })),
       // {date} stays the long form for compatibility; {date_short} is dd/MM/yyyy,
       // {date_long} an explicit alias — both usable in the template.
       date: longDatePtBR(now),

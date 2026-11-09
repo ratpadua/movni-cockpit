@@ -227,6 +227,23 @@ export const invoiceModifiers = mysqlTable('invoice_modifiers', {
   discountPercent: decimal('discount_percent', { precision: 5, scale: 2 }).notNull().default('0'),
 });
 
+// Customer credits applied to a one-time contract OR a fatura: one row per credit used
+// (a record can use several credits). Exactly one of contract_id / invoice_id is set.
+// contracts/invoices.credit_id + credit_applied are LEGACY (kept in sync: credit_applied =
+// total of these rows, credit_id = first credit) and will be dropped in a later step.
+// A credit with applications cannot be deleted (restrict); deleting the contract/invoice
+// cascades its applications (the amounts are reinstated first, in the route).
+export const creditApplications = mysqlTable('credit_applications', {
+  id: int('id').autoincrement().primaryKey(),
+  creditId: int('credit_id')
+    .references(() => customerCredits.id, { onDelete: 'restrict' })
+    .notNull(),
+  contractId: int('contract_id').references(() => contracts.id, { onDelete: 'cascade' }),
+  invoiceId: int('invoice_id').references(() => invoices.id, { onDelete: 'cascade' }),
+  amount: decimal('amount', { precision: 12, scale: 2 }).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 export const contractDocuments = mysqlTable('contract_documents', {
   id: int('id').autoincrement().primaryKey(),
   contractId: int('contract_id').references(() => contracts.id, { onDelete: 'cascade' }),

@@ -50,6 +50,13 @@
       "when": 1793360308080,
       "tag": "0006_kind_brood",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "5",
+      "when": 1794252935253,
+      "tag": "0007_new_centennial",
+      "breakpoints": true
     }
   ]
 }

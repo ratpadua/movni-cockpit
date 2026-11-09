@@ -63,7 +63,11 @@ export function registerCustomerRoutes(app: FastifyInstance) {
     if (creditId === null) return badId(reply);
     const [c] = await db.select().from(schema.customerCredits).where(eq(schema.customerCredits.id, creditId));
     if (!c) return reply.code(204).send();
-    if (Number(c.remaining) !== Number(c.value)) {
+    const [apps] = await db
+      .select({ n: sql<number>`count(*)` })
+      .from(schema.creditApplications)
+      .where(eq(schema.creditApplications.creditId, creditId));
+    if (Number(c.remaining) !== Number(c.value) || Number(apps?.n ?? 0) > 0) {
       return reply.code(409).send({ error: 'Crédito já utilizado — não pode ser excluído.' });
     }
     await db.delete(schema.customerCredits).where(eq(schema.customerCredits.id, creditId));

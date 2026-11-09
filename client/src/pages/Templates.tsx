@@ -62,12 +62,13 @@ const INSTALLMENTS_GROUP: FieldGroup = {
 
 const CREDIT_GROUP: FieldGroup = {
   title: 'Crédito do cliente',
-  note: 'Só há valores quando um crédito foi usado. Use o bloco {#credit_used} … {/credit_used} para exibir algo apenas quando houver crédito.',
+  note: 'Só há valores quando crédito(s) foi(ram) usado(s). Use o bloco {#credit_used} … {/credit_used} para exibir algo apenas quando houver crédito. Um contrato/fatura pode usar vários créditos: para listar cada um, use o bloco {#credits} … {/credits} (dentro dele, {credit_description} e {credit_amount} são os do crédito da linha).',
   fields: [
-    ['{credit_used}', 'Indica se um crédito foi aplicado (bloco condicional)'],
-    ['{credit_description}', 'Descrição do crédito utilizado'],
-    ['{credit_applied}', 'Valor do crédito aplicado (negativo, ex.: -R$ 300,00)'],
+    ['{credit_used}', 'Indica se algum crédito foi aplicado (bloco condicional)'],
+    ['{credit_description}', 'Descrição do crédito utilizado (com vários créditos: descrições separadas por vírgula)'],
+    ['{credit_applied}', 'Total de créditos aplicado (negativo, ex.: -R$ 300,00)'],
     ['{total_after_credit}', 'Valor a pagar após o crédito (igual a {total})'],
+    ['{#credits}{credit_description} {credit_amount}{/credits}', 'Lista dos créditos usados, um por linha: descrição e valor do crédito (positivo, ex.: R$ 100,00)'],
   ],
 };
 

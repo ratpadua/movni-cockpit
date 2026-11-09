@@ -22,6 +22,7 @@ import { notifications } from '@mantine/notifications';
 import {
   api,
   Customer,
+  AppliedCredit,
   CustomerCredit,
   TemplateInfo,
   ServiceCatalog,
@@ -29,6 +30,13 @@ import {
   ContractDetail,
 } from '../api/client';
 import InstallmentPlanner, { InstallmentValue } from './InstallmentPlanner';
+import CreditPicker, {
+  CreditSelection,
+  creditsPayload,
+  creditsTotal,
+  selectionFromApplied,
+  validateCredits,
+} from './CreditPicker';
 import { todayIso } from '../lib/dates';
 import { MONEY_INPUT_BRL } from '../lib/money';
 
@@ -65,7 +73,9 @@ export default function ContractFormModal({
 
   const [type, setType] = useState<'contract' | 'invoice'>('contract');
   const [customerId, setCustomerId] = useState<string | null>(null);
-  const [creditId, setCreditId] = useState<string | null>(null);
+  // Credits ticked for this contract (creditId -> amount) + the ones already applied (edit).
+  const [creditSel, setCreditSel] = useState<CreditSelection>({});
+  const [appliedCredits, setAppliedCredits] = useState<AppliedCredit[]>([]);
   const [comments, setComments] = useState('');
   // recurring
   const [title, setTitle] = useState('');
@@ -89,10 +99,12 @@ export default function ContractFormModal({
   // Editing a contract that already has a received/paid payment: values and installments are locked.
   const [hasReceived, setHasReceived] = useState(false);
 
+  // ALL credits (?all=1): one this contract consumed completely has remaining 0 and must still
+  // be listed when editing (the picker hides the others without balance).
   const { data: credits = [] } = useQuery({
-    queryKey: ['/customers', customerId, 'credits'],
-    queryFn: () => api.get<CustomerCredit[]>(`/customers/${customerId}/credits`),
-    enabled: !!customerId,
+    queryKey: ['/customers', customerId, 'credits', 'all'],
+    queryFn: () => api.get<CustomerCredit[]>(`/customers/${customerId}/credits?all=1`),
+    enabled: !!customerId && opened,
   });
 
   const tplOptions = (kind: 'contract' | 'invoice' | 'receipt') =>
@@ -111,7 +123,8 @@ export default function ContractFormModal({
   const resetCreate = () => {
     setType('contract');
     setCustomerId(null);
-    setCreditId(null);
+    setCreditSel({});
+    setAppliedCredits([]);
     setComments('');
     setTitle('');
     setInvoiceTemplateId(null);
@@ -136,7 +149,8 @@ export default function ContractFormModal({
     const d = await api.get<ContractDetail>(`/contracts/${id}`);
     setType(d.type);
     setCustomerId(d.customerId != null ? String(d.customerId) : null);
-    setCreditId(null); // credit is applied only at creation
+    setAppliedCredits(d.credits ?? []);
+    setCreditSel(selectionFromApplied(d.credits));
     setComments(d.comments ?? '');
     setTitle(d.title ?? '');
     setInvoiceTemplateId(d.invoiceTemplateId != null ? String(d.invoiceTemplateId) : null);
@@ -209,9 +223,9 @@ export default function ContractFormModal({
   const modTotal = modifiers.reduce((s, m) => s + (Number(m.price) || 0) * (1 - (Number(m.disc) || 0) / 100), 0);
   const total = Math.max(0, serviceLine + addTotal + modTotal);
 
-  // Prepaid credit reduces the amount split into installments (create only).
-  const selCredit = credits.find((c) => String(c.id) === creditId);
-  const creditApplied = selCredit ? Math.min(Number(selCredit.remaining), total) : 0;
+  // Prepaid credits (one editable amount each) reduce the amount split into installments.
+  const creditApplied = creditsTotal(creditSel);
+  const creditCheck = validateCredits(creditSel, credits, appliedCredits, total);
   const baseAfterCredit = Math.max(0, total - creditApplied);
 
   const isRecurring = type === 'invoice';
@@ -240,7 +254,7 @@ export default function ContractFormModal({
         executionAddress: execAddress || null,
         duration: duration || null,
         quantity: quantity === '' || quantity == null ? null : Number(quantity),
-        creditId: creditId ? Number(creditId) : null,
+        credits: creditsPayload(creditSel),
         installments: plan.count,
         dueDates: plan.dueDates,
         items: serviceVersionId
@@ -265,12 +279,13 @@ export default function ContractFormModal({
         delete payload.modifiers;
         delete payload.installments;
         delete payload.dueDates;
-        delete payload.creditId;
+        delete payload.credits;
       }
       return editingId ? api.put(`/contracts/${editingId}`, payload) : api.post('/contracts', payload);
     },
     onSuccess: (res: any) => {
       qc.invalidateQueries({ queryKey: ['/contracts'] });
+      qc.invalidateQueries({ queryKey: ['/customers'] }); // credits balances changed
       if (editingId) qc.invalidateQueries({ queryKey: ['/contracts', editingId, 'detail'] });
       notifications.show({ message: 'Contrato salvo', color: 'green' });
       onClose();
@@ -290,7 +305,7 @@ export default function ContractFormModal({
           </Alert>
         )}
         <Group grow>
-          <Select label="Cliente" placeholder="Selecione" data={customers.map((c) => ({ value: String(c.id), label: c.name }))} value={customerId} onChange={(v) => { setCustomerId(v); setCreditId(null); }} searchable required />
+          <Select label="Cliente" placeholder="Selecione" data={customers.map((c) => ({ value: String(c.id), label: c.name }))} value={customerId} onChange={(v) => { setCustomerId(v); setCreditSel({}); }} searchable required />
           <Select
             label="Tipo"
             data={[
@@ -406,23 +421,14 @@ export default function ContractFormModal({
               <Text size="sm" c="dimmed">Serviço: {brl(serviceLine)} · Adicionais: {brl(addTotal)} · Modificadores: {brl(modTotal)}</Text>
             </Group>
 
-            {!editingId && credits.length > 0 && (
-              <Select
-                label="Usar crédito do cliente"
-                placeholder="Nenhum"
-                clearable
-                searchable
-                data={credits.map((c) => ({
-                  value: String(c.id),
-                  label: `${c.description} — restante ${brl(Number(c.remaining))}`,
-                }))}
-                value={creditId}
-                onChange={setCreditId}
-                description={
-                  creditApplied > 0
-                    ? `${brl(creditApplied)} abatido com crédito · a parcelar: ${brl(baseAfterCredit)}`
-                    : undefined
-                }
+            {customerId && (
+              <CreditPicker
+                credits={credits}
+                applied={appliedCredits}
+                total={total}
+                value={creditSel}
+                onChange={setCreditSel}
+                disabled={!!editingId && hasReceived}
               />
             )}
 
@@ -454,6 +460,7 @@ export default function ContractFormModal({
             disabled={
               !customerId ||
               !effectiveReceiptId ||
+              (!isRecurring && !(editingId && hasReceived) && !creditCheck.ok) ||
               (isRecurring ? !invoiceTemplateId : !serviceVersionId || !templateId)
             }
             onClick={() => save.mutate()}
