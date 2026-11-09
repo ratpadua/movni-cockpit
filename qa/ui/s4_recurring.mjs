@@ -129,11 +129,12 @@ await S.flow('Contrato recorrente: faturas', async () => {
   await d.getByLabel('Referência').fill('Mensal');
   await d.getByText(/QAZ item A/).first().click();
   await d.getByLabel('Desconto (%)').fill('10');
-  const cr = await U.optionsOf(page, d, 'Usar crédito do cliente');
-  ok('invoice credit options alphabetical and labeled "restante"', U.isSorted(cr) && cr.every((x) => /restante R\$/.test(x)), JSON.stringify(cr));
-  await page.getByRole('option', { name: /credito fatura/ }).first().click();
+  const crBox = d.getByRole('checkbox', { name: /credito fatura/ });
+  await crBox.waitFor();
+  ok('invoice credit picker lists the credits with "Disponível R$"', (await d.getByText(/Disponível R\$/).count()) >= 1);
+  await crBox.check();
   const calc = sp(await d.innerText());
-  ok('summary: Subtotal R$ 1.000,00 · Total R$ 900,00 · Crédito -R$ 120,00 · A parcelar R$ 780,00', /Subtotal: R\$\s?1\.000,00/.test(calc) && /Total: R\$\s?900,00/.test(calc) && /Crédito: -R\$\s?120,00/.test(calc) && /A parcelar: R\$\s?780,00/.test(calc), calc.slice(-400));
+  ok('summary: Subtotal R$ 1.000,00 · Total R$ 900,00 · Crédito -R$ 120,00 · A parcelar R$ 780,00', /Subtotal: R\$\s?1\.000,00/.test(calc) && /Total: R\$\s?900,00/.test(calc) && /Total de créditos: -R\$\s?120,00/.test(calc) && /A parcelar: R\$\s?780,00/.test(calc), calc.slice(-400));
   await U.pickOption(page, d, /Parcelas \(máx/, /^2 \(/);
   await L.shot(page, 'recorrente_fatura_credito');
   await d.getByRole('button', { name: 'Criar fatura' }).click();

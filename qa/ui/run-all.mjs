@@ -12,7 +12,7 @@ fs.mkdirSync(RES, { recursive: true });
 const isResult = (f) => /^r\d[0-9a-z_]*\.json$/.test(f);
 for (const f of fs.readdirSync(RES)) if (isResult(f)) fs.unlinkSync(path.join(RES, f));
 
-const steps = ['s0_login', 's1_seed', 's2_payments', 's3_contracts', 's4_recurring', 's4b_invoice_edit', 's5_customers', 's6_templates_bank', 's6b_reupload', 's7_reports_settings', 's10_fixes'];
+const steps = ['s0_login', 's1_seed', 's2_payments', 's3_contracts', 's4_recurring', 's4b_invoice_edit', 's5_customers', 's6_templates_bank', 's6b_reupload', 's7_reports_settings', 's10_fixes', 's11_credits'];
 if (!process.argv.includes('--desktop-only')) steps.push('s8_responsive');
 steps.push('s9_cleanup');
 const code = {};

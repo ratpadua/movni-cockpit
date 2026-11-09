@@ -80,14 +80,13 @@ await S.flow('Contratos: novo contrato unico (DateField + InstallmentPlanner)', 
   const addRow = d.locator('tr').filter({ hasText: 'Extra' }).first();
   await addRow.getByRole('textbox').first().fill('1');
   await d.getByText(/Adicionais: R\$\s?100,00/).waitFor();
-  // credit select
-  const cr = await U.optionsOf(page, d, 'Usar crédito do cliente');
-  ok('credit options alphabetical', U.isSorted(cr) && cr.length >= 2, JSON.stringify(cr));
-  const openCred = cr.find((x) => /credito aberto/.test(x));
-  ok('credit label shows "restante R$ 300,00"', /restante R\$\s?300,00/.test(sp(openCred || '')), openCred);
-  await page.getByRole('option', { name: /credito aberto/ }).click();
-  await d.getByText(/R\$\s?300,00 abatido com crédito · a parcelar: R\$\s?700,00/).waitFor();
-  ok('credit description "R$ 300,00 abatido com crédito · a parcelar: R$ 700,00"', true);
+  // credit picker: checkbox + amount per credit
+  const crBox = d.getByRole('checkbox', { name: /QAZ credito aberto/ });
+  await crBox.waitFor();
+  ok('picker shows "Disponível R$ 300,00" for the open credit', (await d.getByText(/Disponível R\$\s?300,00/).count()) > 0);
+  await crBox.check();
+  await d.getByText(/Total de créditos: -R\$\s?300,00 · A parcelar: R\$\s?700,00/).waitFor();
+  ok('picker summary "Total de créditos: -R$ 300,00 · A parcelar: R$ 700,00"', true);
   // installments
   const planner = d.locator('text=Parcelas (máx.').first();
   const parc = await U.optionsOf(page, d, /Parcelas \(máx/);

@@ -88,3 +88,14 @@ small, gentle smoke test of the app against the real remote DB (Hostinger thrott
    installment blocks the delete (409), re-open + delete, customer delete, payment create/edit/delete. Everything QAZ-REL is removed and
    the row counts must equal the baseline (exit code 1 otherwise).
 4. Stop the server and free port 5178.
+
+## Multiple credits (credit_applications)
+
+- `api/smoke.mjs` section **R** covers multi-credit contracts/faturas (amount lists, every 400, edit/replace/clear, 409 after a
+  receipt, exact reinstatement, type change, concurrency, docx/odt documents with `{credit_applied}`, `{credit_description}`
+  and a `{#credits}` loop) and the **legacy path**: legacy-only rows (credit_id + credit_applied, no applications) read through the
+  fallback, edited/deleted before the backfill, then `db:add-columns` (spawned by the test) backfills exactly one row per legacy
+  record, is idempotent, does not resurrect a record whose credits were removed, and recreates the table after a `DROP TABLE`.
+  Local DB only (`DB_TARGET=local`): the test drops and recreates `credit_applications`.
+- `ui/s11_credits.mjs` drives the shared CreditPicker (contract create/edit, new/edit fatura, validation, disabled after a receipt,
+  customer switching, displays, 375/768 px).

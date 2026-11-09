@@ -286,13 +286,12 @@ await S.flow('Fix 1+2+3 - Faturas: editar fatura com credito usado, nova fatura 
   let d = U.dlg(page);
   await d.getByText('Editar fatura').first().waitFor();
   await page.waitForTimeout(800);
-  const credInput = d.getByLabel('Usar crédito do cliente').first();
-  const credVal = sp(await credInput.inputValue());
-  ok('Editar fatura: the fully used credit is shown selected ("QAZ Fix credito 510 — restante R$ 510,00")', /QAZ Fix credito 510/.test(credVal) && /restante R\$\s?510,00/.test(credVal), credVal);
+  const box510 = d.getByRole('checkbox', { name: /QAZ Fix credito 510/ });
+  ok('Editar fatura: the fully used credit is listed, ticked, with "Disponível R$ 510,00"', (await box510.isChecked()) && (await d.getByText(/Disponível R\$\s?510,00/).count()) > 0);
+  eq('Editar fatura: its amount field shows 510 (R$ 510)', Number(sp(await d.getByLabel(/Valor a usar do crédito QAZ Fix credito 510/).inputValue()).replace(/[^\d,-]/g, '').replace(',', '.')), 510);
   const t = sp(await d.innerText());
-  ok('Editar fatura summary: Total R$ 900,00 · Crédito -R$ 510,00 · A parcelar R$ 390,00', /Total: R\$\s?900,00/.test(t) && /Crédito: -R\$\s?510,00/.test(t) && /A parcelar: R\$\s?390,00/.test(t), t.slice(-300));
-  const opts = await U.optionsOf(page, d, 'Usar crédito do cliente'); await U.closeDropdown(page);
-  ok('Editar fatura: options = applied credit + still-open credit', opts.some((o) => /credito 510/.test(o)) && opts.some((o) => /credito 200 — restante R\$\s?200,00/.test(sp(o))), JSON.stringify(opts));
+  ok('Editar fatura summary: Total R$ 900,00 · Total de créditos -R$ 510,00 · A parcelar R$ 390,00', /Total: R\$\s?900,00/.test(t) && /Total de créditos: -R\$\s?510,00/.test(t) && /A parcelar: R\$\s?390,00/.test(t), t.slice(-300));
+  ok('Editar fatura: the still-open credit R$ 200,00 is listed and unticked', (await d.getByRole('checkbox', { name: /QAZ Fix credito 200/ }).count()) === 1 && !(await d.getByRole('checkbox', { name: /QAZ Fix credito 200/ }).isChecked()));
   const dd = await d.locator('table input[placeholder="dd/mm/aaaa"]').evaluateAll((e) => e.map((x) => x.value));
   ok('Editar fatura: installment date dd/MM/yyyy', dd.length === 1 && /^\d{2}\/\d{2}\/\d{4}$/.test(dd[0]), JSON.stringify(dd));
   await dateProbe('fatura "Primeiro vencimento"', d.getByLabel('Primeiro vencimento').first());
@@ -314,9 +313,8 @@ await S.flow('Fix 1+2+3 - Faturas: editar fatura com credito usado, nova fatura 
   d = U.dlg(page);
   await d.getByText('Nova fatura').first().waitFor();
   await d.getByText(/QAZ fix C livre/).first().click();
-  const nopts = await U.optionsOf(page, d, 'Usar crédito do cliente'); await U.closeDropdown(page);
-  ok('Nova fatura: fully used credit NOT selectable', !nopts.some((o) => /credito 510/.test(o)), JSON.stringify(nopts));
-  ok('Nova fatura: open credit (R$ 200,00) selectable', nopts.some((o) => /credito 200 — restante R\$\s?200,00/.test(sp(o))), JSON.stringify(nopts));
+  ok('Nova fatura: fully used credit NOT listed', (await d.getByRole('checkbox', { name: /QAZ Fix credito 510/ }).count()) === 0);
+  ok('Nova fatura: open credit (R$ 200,00) listed with "Disponível R$ 200,00"', (await d.getByRole('checkbox', { name: /QAZ Fix credito 200/ }).count()) === 1 && (await d.getByText(/Disponível R\$\s?200,00/).count()) > 0);
   // invoice modifier in pt-BR
   await d.getByRole('button', { name: 'Adicionar' }).first().click();
   await d.getByPlaceholder('Descrição').last().fill('QAZ fix mod fatura');
@@ -666,6 +664,8 @@ await S.flow('Fix 3 - Dinheiro: Ctrl+V real com a area de transferencia', async 
   eq('Ctrl+V "1234.56" -> R$ 1.234,56', await realPaste(v, '1234.56'), 'R$ 1.234,56');
   eq('Ctrl+V "1.234" -> R$ 1.234 (thousands, untouched)', await realPaste(v, '1.234'), 'R$ 1.234');
   eq('Ctrl+V "1.234,56" -> R$ 1.234,56', await realPaste(v, '1.234,56'), 'R$ 1.234,56');
+  eq('Ctrl+V "40" over an existing amount -> R$ 40', await realPaste(v, '40'), 'R$ 40');
+  eq('Ctrl+V "7" over an existing amount -> R$ 7', await realPaste(v, '7'), 'R$ 7');
   eq('Ctrl+V "1234,56" -> R$ 1.234,56', await realPaste(v, '1234,56'), 'R$ 1.234,56');
   eq('Ctrl+V "1.234.567" -> R$ 1.234.567', await realPaste(v, '1.234.567'), 'R$ 1.234.567');
   await d.getByLabel('Descrição').fill('QAZ-FIX ctrl-v');
@@ -798,11 +798,11 @@ await S.flow('Contrato novo: com credito, sem credito e troca de cliente (UI)', 
   await page.getByRole('button', { name: 'Novo contrato' }).click();
   let d = U.dlg(page);
   await fill(d, 'QAZ Fix Cliente Credito');
-  await U.pickOption(page, d, 'Usar crédito do cliente', /QAZ Fix credito A/);
-  eq('credit selected', sp(await d.getByLabel('Usar crédito do cliente').first().inputValue()).includes('QAZ Fix credito A'), true);
+  await d.getByRole('checkbox', { name: /QAZ Fix credito A/ }).check();
+  eq('credit selected', await d.getByRole('checkbox', { name: /QAZ Fix credito A/ }).isChecked(), true);
   // (2) switch customer: the credit selection is dropped and the other customer has none
   await U.pickOption(page, d, 'Cliente', 'QAZ Fix Cliente Sem Credito');
-  eq('switching customer clears the credit selection', await d.getByLabel('Usar crédito do cliente').count() === 0 || (await d.getByLabel('Usar crédito do cliente').first().inputValue()) === '', true);
+  eq('switching customer: the other customer has no credits, the picker is gone', await d.getByRole('checkbox', { name: /QAZ Fix credito A/ }).count(), 0);
   await fill(d, 'QAZ Fix Cliente Sem Credito');
   await d.getByRole('button', { name: 'Salvar' }).click();
   ok('(without credit, after switching customers) toast "Contrato salvo"', await U.toast(page, /Contrato salvo/));
@@ -814,7 +814,7 @@ await S.flow('Contrato novo: com credito, sem credito e troca de cliente (UI)', 
   await page.getByRole('button', { name: 'Novo contrato' }).click();
   d = U.dlg(page);
   await fill(d, 'QAZ Fix Cliente Credito');
-  await U.pickOption(page, d, 'Usar crédito do cliente', /QAZ Fix credito A/);
+  await d.getByRole('checkbox', { name: /QAZ Fix credito A/ }).check();
   await d.getByRole('button', { name: 'Salvar' }).click();
   ok('(with credit) toast "Contrato salvo"', await U.toast(page, /Contrato salvo/));
   await page.waitForTimeout(800);
