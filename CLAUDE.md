@@ -329,14 +329,19 @@ Receipts: `{amount}`, `{amount_left}` (still owed **on that invoice/contract onl
 
 ## 7. Packaging the portable Windows bundle
 
-Output: `movni-cockpit-portable-win64.zip` (extract and double-click `start.cmd`; nothing to install;
-LibreOffice only for PDF). Steps:
+Output: `movni-cockpit-portable-win64-<version>.zip`, e.g. `movni-cockpit-portable-win64-1-2.zip` for release
+`1.2` (extract and double-click `start.cmd`; nothing to install; LibreOffice only for PDF). **The bundle is
+always versioned:** the version is the git tag on `HEAD`, so create the release tag **before** packaging
+(the script refuses to build without one and warns about uncommitted tracked changes; `-Version` is only for
+test builds and marks `VERSION.txt` as a test build). The version appears in the zip
+name, in `VERSION.txt` inside the bundle, in the `start.cmd` window title and in `COMO-INSTALAR.txt`. Steps:
 
 1. Point `.env` `DB_NAME` at the **production** database (name: see the private memory note above).
-2. Run `powershell -ExecutionPolicy Bypass -File scripts\package-win.ps1` (builds client + server,
+2. Tag the release (e.g. `1.3`) on the merged `main` commit, check out that commit, then run
+   `powershell -ExecutionPolicy Bypass -File scripts\package-win.ps1` (builds client + server,
    stages `dist-portable/`, zips).
-3. **Verify the bundle:** baked `.env` targets production; a grep for `DB_USER`/`DB_PASS`/passwords
-   finds nothing; there is **no `.env.local`** in the bundle.
+3. **Verify the bundle:** the zip name carries the version and `VERSION.txt` is inside; baked `.env` targets
+   production; a grep for `DB_USER`/`DB_PASS`/passwords finds nothing; there is **no `.env.local`** in the bundle.
 4. **Revert `.env` to the dev database.**
 5. If the schema changed, remind the owner production needs `db:add-columns` before the new bundle is used.
 
