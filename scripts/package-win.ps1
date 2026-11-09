@@ -3,7 +3,14 @@
 # its node_modules, the .env, and a double-click start.cmd. The target machine
 # needs NOTHING installed -- just extract and run start.cmd.
 #
-# Usage (from anywhere):  powershell -ExecutionPolicy Bypass -File scripts\package-win.ps1
+# The bundle is VERSIONED: the version is the git tag on HEAD (e.g. 1.2), so tag the
+# release first. Output: movni-cockpit-portable-win64-<version with dots as dashes>.zip
+# (e.g. ...-1-2.zip), plus a VERSION.txt inside the bundle and the version in start.cmd
+# and COMO-INSTALAR.txt. Pass -Version only for a test build.
+#
+# Usage (from anywhere):  powershell -ExecutionPolicy Bypass -File scripts\package-win.ps1 [-Version 1.2]
+
+param([string]$Version = '')
 
 $ErrorActionPreference = 'Stop'
 
@@ -23,9 +30,40 @@ function Remove-TreeSafe($path) {
 $root = Split-Path -Parent $PSScriptRoot           # project root
 $out = Join-Path $root 'dist-portable'             # staging + zip live here
 $app = Join-Path $out 'movni-cockpit'              # the bundled "app root"
-$zip = Join-Path $root 'movni-cockpit-portable-win64.zip'
+
+# --- version ---------------------------------------------------------------
+# Never build an unversioned bundle: use the tag on HEAD unless -Version was given.
+# Get-Git: PowerShell 5.1 throws on a non-zero native exit under 'Stop' even with 2>$null,
+# so run git with 'Continue' and return $null on failure (lets us show our own message).
+function Get-Git {
+  $p = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  try {
+    $r = & git -C $root @args 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return $r
+  } finally { $ErrorActionPreference = $p }
+}
+$commit = Get-Git rev-parse --short HEAD
+if (-not $commit) { $commit = 'unknown' }
+$testBuild = $false
+if ($Version) {
+  $testBuild = $true   # explicit -Version: a test build, not a tagged release
+} else {
+  $Version = Get-Git describe --tags --exact-match HEAD
+  if (-not $Version) {
+    throw "No version: HEAD has no git tag. Tag the release first (e.g. git tag -a 1.3 -m ...) or pass -Version for a test build."
+  }
+}
+$Version = ([string]$Version).Trim()
+if ($Version -notmatch '^[0-9A-Za-z][0-9A-Za-z._-]*$') { throw "Invalid version '$Version'." }
+$dirty = Get-Git status --porcelain --untracked-files=no
+if ($dirty) { Write-Warning "The working tree has uncommitted changes; the bundle will not match tag $Version exactly." }
+if ($testBuild) { Write-Warning "-Version was given: this is a TEST build, not a tagged release." }
+$zipName = 'movni-cockpit-portable-win64-' + ($Version -replace '\.', '-') + '.zip'
+$zip = Join-Path $root $zipName
 
 Write-Host "Project root: $root"
+Write-Host "Version: $Version ($commit) -> $zipName"
 
 # --- 1. build client + server ---------------------------------------------
 Write-Host "`n[1/5] Building client..."
@@ -66,20 +104,26 @@ Copy-Item (Get-Command node).Source (Join-Path $app 'node\node.exe')
 Write-Host "[4/5] Writing launcher..."
 $startCmd = @'
 @echo off
-title Movni Cockpit
+title Movni Cockpit @@VERSION@@
 cd /d "%~dp0server"
 set OPEN_BROWSER=1
-echo Iniciando o Movni Cockpit...
+echo Iniciando o Movni Cockpit @@VERSION@@...
 echo O navegador abrira automaticamente. Se nao abrir, acesse: http://localhost:5178
 echo (Para encerrar, feche esta janela.)
 echo.
 "%~dp0node\node.exe" dist\index.js
 pause
 '@
+$startCmd = $startCmd.Replace('@@VERSION@@', $Version)
 Set-Content -Path (Join-Path $app 'start.cmd') -Value $startCmd -Encoding ASCII
 
+# VERSION.txt: which release this bundle is (also shown in start.cmd and COMO-INSTALAR.txt).
+$versionTxt = "Movni Cockpit $Version`r`nCommit: $commit`r`nGerado em: " + (Get-Date -Format 'yyyy-MM-dd HH:mm') + "`r`n"
+if ($testBuild) { $versionTxt += "ATENCAO: build de teste (nao e uma versao oficial)`r`n" }
+Set-Content -Path (Join-Path $app 'VERSION.txt') -Value $versionTxt -Encoding ASCII
+
 $readme = @'
-MOVNI COCKPIT - Instalacao portatil (Windows 64-bit)
+MOVNI COCKPIT @@VERSION@@ - Instalacao portatil (Windows 64-bit)
 =====================================================
 
 Nao precisa instalar nada. Passos:
@@ -105,6 +149,7 @@ Observacao (PDF): para baixar documentos em PDF, instale o LibreOffice
 (gratuito, em libreoffice.org). Sem ele, os documentos ainda podem ser
 baixados em Word (.docx) normalmente.
 '@
+$readme = $readme.Replace('@@VERSION@@', $Version)
 Set-Content -Path (Join-Path $app 'COMO-INSTALAR.txt') -Value $readme -Encoding UTF8
 
 # --- 5. zip ----------------------------------------------------------------

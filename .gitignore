@@ -2,7 +2,7 @@ node_modules/
 dist/
 build/
 dist-portable/
-movni-cockpit-portable-win64.zip
+movni-cockpit-portable-win64*.zip
 .env
 .env.local
 *.log
