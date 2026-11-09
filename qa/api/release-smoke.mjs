@@ -67,7 +67,7 @@ function docx(text) {
   return z.generate({ type: 'nodebuffer', compression: 'DEFLATE' });
 }
 
-const TABLES = ['bank_imports', 'categories', 'contract_documents', 'contract_items', 'contract_modifiers', 'contracts', 'customer_credits', 'customers', 'invoice_modifiers', 'invoices', 'item_additionals', 'payments', 'service_additionals', 'service_versions', 'services', 'settings', 'templates', 'transactions'];
+const TABLES = ['bank_imports', 'categories', 'contract_documents', 'contract_items', 'contract_modifiers', 'contracts', 'credit_applications', 'customer_credits', 'customers', 'invoice_modifiers', 'invoices', 'item_additionals', 'payments', 'service_additionals', 'service_versions', 'services', 'settings', 'templates', 'transactions'];
 let sql = null;
 const counts = async () => { const o = {}; for (const t of TABLES) o[t] = Number((await sql.query(`select count(*) c from \`${t}\``))[0][0].c); return o; };
 let baseline = null;
@@ -89,6 +89,10 @@ async function main() {
   const ix = (await sql.query("select index_name n, non_unique u from information_schema.statistics where table_schema = database() and index_name in ('contracts_number_uq','invoices_ref_number_uq')"))[0];
   ok('unique indexes contracts_number_uq and invoices_ref_number_uq exist', ix.length === 2 && ix.every((x) => Number(x.u) === 0), short(ix));
 
+  const fkNames = (await sql.query("select constraint_name n from information_schema.table_constraints where table_schema = database() and table_name = 'credit_applications' and constraint_type = 'FOREIGN KEY'"))[0];
+  eq('credit_applications has its 3 foreign keys', fkNames.length, 3);
+  const dupApps = Number((await sql.query('select count(*) c from (select contract_id, invoice_id, credit_id from credit_applications group by contract_id, invoice_id, credit_id having count(*) > 1) d'))[0][0].c);
+  eq('credit_applications has no duplicate (record, credit) rows', dupApps, 0);
   // ---- server, login, lists ----
   let r = await api('GET', '/api/health'); eq('GET /api/health 200', r.status, 200);
   r = await api('POST', '/api/login', { username: env.DB_USER, password: env.DB_PASS });
@@ -98,6 +102,20 @@ async function main() {
     ok(`GET /api/${p} 200 and well-formed`, r.status === 200 && (p === 'settings' ? typeof r.body === 'object' : Array.isArray(r.body)), `${r.status}`);
   }
 
+  // read-only: an existing record with a credit application (e.g. a backfilled legacy one) is shown with its credits
+  const appC = (await sql.query('select contract_id id from credit_applications where contract_id is not null order by id limit 1'))[0][0];
+  if (appC) {
+    r = await api('GET', `/api/contracts/${appC.id}`);
+    const sumC = (r.body?.credits || []).reduce((t, c) => t + Number(c.amount), 0);
+    ok('existing contract with a credit application: detail shows credits and creditApplied = their sum', r.status === 200 && r.body.credits?.length >= 1 && Math.abs(sumC - Number(r.body.creditApplied)) < 0.011, `${r.status} ${short(r.body?.credits)}`);
+  } else console.log('  (no existing contract with a credit application to read)');
+  const appI = (await sql.query('select i.contract_id id, i.id iid from credit_applications a join invoices i on i.id = a.invoice_id order by a.id limit 1'))[0][0];
+  if (appI) {
+    r = await api('GET', `/api/contracts/${appI.id}`);
+    const inv = (r.body?.invoices || []).find((x) => x.id === appI.iid);
+    const sumI = (inv?.credits || []).reduce((t, c) => t + Number(c.amount), 0);
+    ok('existing fatura with a credit application: detail shows credits and creditApplied = their sum', r.status === 200 && inv && inv.credits?.length >= 1 && Math.abs(sumI - Number(inv.creditApplied)) < 0.011, `${r.status} ${short(inv?.credits)}`);
+  } else console.log('  (no existing fatura with a credit application to read)');
   // ---- QAZ-REL data ----
   r = await api('POST', '/api/services', { name: 'QAZ-REL Servico', basePrice: '450' });
   const sv = r.body?.currentVersion?.id; ok('create QAZ service (version id)', r.status === 201 && !!sv, `${r.status} ${short(r.body)}`);
@@ -125,6 +143,24 @@ async function main() {
   r = await api('GET', `/api/contracts/${C.id}`); eq('deleted contract is gone (404)', r.status, 404);
   for (const x of par) { if (x.body?.id) await api('DELETE', `/api/contracts/${x.body.id}`); }
   r = await api('DELETE', `/api/customers/${cu.id}`); eq('delete customer (no contracts left) -> 204', r.status, 204);
+  // multi-credit contract: 2 credits with partial amounts, then delete reinstates both exactly
+  r = await api('POST', '/api/customers', { name: 'QAZ-REL Cliente creditos', nickname: 'Rel2' });
+  const cu2 = r.body; ids.customers.push(cu2?.id);
+  const cr1 = (await api('POST', `/api/customers/${cu2.id}/credits`, { description: 'QAZ-REL credito 1', value: '100' })).body;
+  const cr2 = (await api('POST', `/api/customers/${cu2.id}/credits`, { description: 'QAZ-REL credito 2', value: '50' })).body;
+  ok('create QAZ customer with 2 credits (100 and 50)', !!cu2?.id && !!cr1?.id && !!cr2?.id);
+  r = await api('POST', '/api/contracts', { ...body, customerId: cu2.id, credits: [{ creditId: cr1.id, amount: 60 }, { creditId: cr2.id, amount: 50 }], installments: 1, dueDates: ['2027-01-10'] });
+  const MC = r.body; if (MC?.id) ids.contracts.push(MC.id);
+  ok('contract using both credits (60 + 50): creditApplied 110, 2 credits listed', r.status === 201 && Number(MC.creditApplied) === 110 && MC.credits?.length === 2, `${r.status} ${short(r.body?.credits)}`);
+  const apps = (await sql.query('select credit_id c, amount a from credit_applications where contract_id = ? order by id', [MC?.id]))[0];
+  ok('credit_applications has 2 rows (60 and 50) for the contract', apps.length === 2 && apps.map((x) => Number(x.a)).join(',') === '60,50', short(apps));
+  const remOf = async (id) => Number((await sql.query('select remaining r from customer_credits where id = ?', [id]))[0][0].r);
+  ok('balances after use: credit 1 = 40, credit 2 = 0', (await remOf(cr1.id)) === 40 && (await remOf(cr2.id)) === 0);
+  ok('installment is on the net total (450 - 110 = 340)', Math.abs(Number((await sql.query('select coalesce(sum(amount),0) s from payments where contract_id = ?', [MC.id]))[0][0].s) - 340) < 0.011);
+  r = await api('DELETE', `/api/contracts/${MC.id}`); eq('delete the multi-credit contract -> 204', r.status, 204);
+  ok('both credits reinstated exactly (100 and 50) and no application rows left', (await remOf(cr1.id)) === 100 && (await remOf(cr2.id)) === 50 && Number((await sql.query('select count(*) c from credit_applications where contract_id = ?', [MC.id]))[0][0].c) === 0);
+  await api('DELETE', `/api/customers/${cu2.id}/credits/${cr1.id}`); await api('DELETE', `/api/customers/${cu2.id}/credits/${cr2.id}`);
+  r = await api('DELETE', `/api/customers/${cu2.id}`); eq('delete customer 2 (credits removed first) -> 204', r.status, 204);
   // a payment: create / edit / delete
   r = await api('POST', '/api/payments', { description: 'QAZ-REL pagamento', amount: '12,34', flow: 'out', dueDate: '2027-03-01' });
   const P = r.body; ok('create payment (amount 12.34)', r.status === 201 && Number(P?.amount) === 12.34, `${r.status} ${short(r.body)}`);
@@ -138,6 +174,7 @@ async function cleanup() {
   if (!sql) return;
   try {
     for (const id of ids.contracts) await sql.query('delete from contracts where id = ?', [id]);
+    await sql.query("delete from credit_applications where credit_id in (select id from customer_credits where description like 'QAZ-REL%')");
     await sql.query("delete from payments where description like 'QAZ-REL%'");
     await sql.query("delete from contracts where customer_id in (select id from customers where name like 'QAZ-REL%')");
     await sql.query("delete from customers where name like 'QAZ-REL%'");
